@@ -368,9 +368,9 @@ private:
                                RangeSet RHS, QualType T) {
     switch (Op) {
     case BO_Or:
-      return VisitOrOperator(LHS, RHS, T);
+      return VisitBinaryOperator<BO_Or>(LHS, RHS, T);
     case BO_And:
-      return VisitAndOperator(LHS, RHS, T);
+      return VisitBinaryOperator<BO_And>(LHS, RHS, T);
     default:
       return infer(T);
     }
@@ -402,18 +402,18 @@ private:
                  ValueFactory.Convert(To, Origin.To()));
   }
 
-  RangeSet VisitOrOperator(RangeSet LHS, RangeSet RHS, QualType T) {
+  template <BinaryOperator::Opcode Op>
+  RangeSet VisitBinaryOperator(RangeSet LHS, RangeSet RHS, QualType T) {
     // We should propagate information about unfeasbility of one of the
     // operands to the resulting range.
     if (LHS.isEmpty() || RHS.isEmpty()) {
       return RangeFactory.getEmptySet();
     }
 
-    APSIntType ResultType = ValueFactory.getAPSIntType(T);
-    RangeSet DefaultRange = infer(T);
-
     Range CoarseLHS = fillGaps(LHS);
     Range CoarseRHS = fillGaps(RHS);
+
+    APSIntType ResultType = ValueFactory.getAPSIntType(T);
 
     // We need to convert ranges to the resulting type, so we can compare values
     // and combine them in a meaningful (in terms of the given operation) way.
@@ -423,23 +423,33 @@ private:
     // It is hard to reason about ranges when conversion changes
     // borders of the ranges.
     if (!ConvertedCoarseLHS || !ConvertedCoarseRHS) {
-      return DefaultRange;
+      return infer(T);
     }
 
+    return VisitBinaryOperator<Op>(*ConvertedCoarseLHS, *ConvertedCoarseRHS, T);
+  }
+
+  template <BinaryOperator::Opcode Op>
+  RangeSet VisitBinaryOperator(Range LHS, Range RHS, QualType T) {
+    return infer(T);
+  }
+
+  template <>
+  RangeSet VisitBinaryOperator<BO_Or>(Range LHS, Range RHS, QualType T) {
+    APSIntType ResultType = ValueFactory.getAPSIntType(T);
     llvm::APSInt Zero = ResultType.getZeroValue();
 
-    bool IsLHSPositiveOrZero = ConvertedCoarseLHS->From() >= Zero;
-    bool IsRHSPositiveOrZero = ConvertedCoarseRHS->From() >= Zero;
+    bool IsLHSPositiveOrZero = LHS.From() >= Zero;
+    bool IsRHSPositiveOrZero = RHS.From() >= Zero;
 
-    bool IsLHSNegative = ConvertedCoarseLHS->To() < Zero;
-    bool IsRHSNegative = ConvertedCoarseRHS->To() < Zero;
+    bool IsLHSNegative = LHS.To() < Zero;
+    bool IsRHSNegative = RHS.To() < Zero;
 
     // Check if both ranges have the same sign.
     if ((IsLHSPositiveOrZero && IsRHSPositiveOrZero) ||
         (IsLHSNegative && IsRHSNegative)) {
       // The result is definitely greater or equal than any of the operands.
-      const llvm::APSInt &Min =
-          std::max(ConvertedCoarseLHS->From(), ConvertedCoarseRHS->From());
+      const llvm::APSInt &Min = std::max(LHS.From(), RHS.From());
 
       // We estimate maximal value for positives as the maximal value for the
       // given type.  For negatives, we estimate it with -1 (e.g. 0x11111111).
@@ -465,12 +475,13 @@ private:
               ValueFactory.getValue(--Zero)};
     }
 
+    RangeSet DefaultRange = infer(T);
+
     // It is pretty hard to reason about operands with different signs
     // (and especially with possibly different signs).  We simply check if it
     // can be zero.  In order to conclude that the result could not be zero,
     // at least one of the operands should be definitely not zero itself.
-    if (!ConvertedCoarseLHS->Includes(Zero) ||
-        !ConvertedCoarseRHS->Includes(Zero)) {
+    if (!LHS.Includes(Zero) || !RHS.Includes(Zero)) {
       return assumeNonZero(DefaultRange, T);
     }
 
@@ -478,19 +489,47 @@ private:
     return DefaultRange;
   }
 
-  RangeSet VisitAndOperator(RangeSet LHS, RangeSet RHS, QualType T) {
-    // TODO: generalize for the ranged RHS.
-    if (const llvm::APSInt *RHSConstant = RHS.getConcreteValue()) {
-      const llvm::APSInt &Zero = ValueFactory.getAPSIntType(T).getZeroValue();
+  template <>
+  RangeSet VisitBinaryOperator<BO_And>(Range LHS, Range RHS, QualType T) {
+    APSIntType ResultType = ValueFactory.getAPSIntType(T);
+    llvm::APSInt Zero = ResultType.getZeroValue();
 
-      // For unsigned types, or positive RHS,
-      // bitwise-and output is always smaller-or-equal than RHS (assuming two's
-      // complement representation of signed types).
-      if (T->isUnsignedIntegerType() || *RHSConstant >= Zero) {
-        return LHS.Intersect(ValueFactory, RangeFactory,
-                             ValueFactory.getMinValue(T), *RHSConstant);
-      }
+    bool IsLHSPositiveOrZero = LHS.From() >= Zero;
+    bool IsRHSPositiveOrZero = RHS.From() >= Zero;
+
+    bool IsLHSNegative = LHS.To() < Zero;
+    bool IsRHSNegative = RHS.To() < Zero;
+
+    // Check if both ranges have the same sign.
+    if ((IsLHSPositiveOrZero && IsRHSPositiveOrZero) ||
+        (IsLHSNegative && IsRHSNegative)) {
+      // The result is definitely less or equal than any of the operands.
+      const llvm::APSInt &Max = std::min(LHS.To(), RHS.To());
+
+      // We conservatively estimate lower bound to be the smallest positive
+      // or negative value corresponding to the sign of the operands.
+      const llvm::APSInt &Min = IsLHSNegative
+                                    ? ValueFactory.getMinValue(ResultType)
+                                    : ValueFactory.getValue(Zero);
+
+      return {RangeFactory, Min, Max};
     }
+
+    // Otherwise, let's check if at least one of the operands is positive.
+    if (IsLHSPositiveOrZero || IsRHSPositiveOrZero) {
+      // This makes result definitely positive.
+      //
+      // We can also reason about a maximal value by finding the maximal
+      // value of the positive operand.
+      const llvm::APSInt &Max = IsLHSPositiveOrZero ? LHS.To() : RHS.To();
+
+      // The minimal value on the other hand is much harder to reason about.
+      // The only thing we know for sure is that the result is positive.
+      return {RangeFactory, ValueFactory.getValue(Zero),
+              ValueFactory.getValue(Max)};
+    }
+
+    // Nothing much else to do here.
     return infer(T);
   }
 
