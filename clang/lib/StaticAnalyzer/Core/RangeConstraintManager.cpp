@@ -371,6 +371,8 @@ private:
       return VisitBinaryOperator<BO_Or>(LHS, RHS, T);
     case BO_And:
       return VisitBinaryOperator<BO_And>(LHS, RHS, T);
+    case BO_Rem:
+      return VisitBinaryOperator<BO_Rem>(LHS, RHS, T);
     default:
       return infer(T);
     }
@@ -531,6 +533,96 @@ private:
 
     // Nothing much else to do here.
     return infer(T);
+  }
+
+  Range makeAbsolute(Range Origin, QualType T) {
+    APSIntType RangeType = ValueFactory.getAPSIntType(T);
+    bool CoversTheWholeType =
+        (Origin.From().isMinSignedValue() || Origin.To().isMaxValue());
+
+    if (CoversTheWholeType) {
+      return {ValueFactory.getMinValue(RangeType),
+              ValueFactory.getMaxValue(RangeType)};
+    }
+
+    if (RangeType.isUnsigned()) {
+      return Range(ValueFactory.getMinValue(RangeType), Origin.To());
+    }
+
+    // At this point, we are sure that the type is signed and we can safely
+    // use unary - operator.
+    //
+    // While calculating absolute maximum, we can use the following formula
+    // because of these reasons:
+    //   * If From >= 0 then To >= From and To >= -From.
+    //     AbsMax == To == max(To, -From)
+    //   * If To <= 0 then -From >= -To and -From >= From.
+    //     AbsMax == -From == max(-From, To)
+    //   * Otherwise, From <= 0, To >= 0, and
+    //     AbsMax == max(abs(From), abs(To))
+    llvm::APSInt AbsMax = std::max(-Origin.From(), Origin.To());
+
+    // Intersection is guaranteed to be non-empty.
+    return {ValueFactory.getValue(-AbsMax), ValueFactory.getValue(AbsMax)};
+  }
+
+  template <>
+  RangeSet VisitBinaryOperator<BO_Rem>(Range LHS, Range RHS, QualType T) {
+    llvm::APSInt Zero = ValueFactory.getAPSIntType(T).getZeroValue();
+
+    // Check if LHS is 0.  It's a special case when the result is guaranteed
+    // to be 0 no matter what RHS is (we put to the side the case when RHS is
+    // 0 itself).
+    const llvm::APSInt *LHSConstant = LHS.getConcreteValue();
+    if (LHSConstant && *LHSConstant == Zero) {
+      return {RangeFactory, *LHSConstant};
+    }
+
+    Range ConservativeRange = makeAbsolute(RHS, T);
+
+    llvm::APSInt Max = ConservativeRange.To();
+    llvm::APSInt Min = ConservativeRange.From();
+
+    // At this point, our conservative range is closed.  The result, however,
+    // couldn't be greater than the RHS' maximal absolute value.  Because of
+    // this reason, we turn the range into open (or half-open in case of
+    // unsigned integers).
+    if (Max == Zero) {
+      // It's an undefined behaviour to divide by 0 and it seems like we know
+      // for sure that RHS is 0.  Let's say that the resulting range is
+      // simply infeasible for that matter.
+      return RangeFactory.getEmptySet();
+    }
+
+    // Offset the boundaries towards zero.
+    //
+    // If we are dealing with unsigned case, we shouldn't move the lower bound.
+    if (Min.isSigned()) {
+      ++Min;
+    }
+    --Max;
+
+    bool IsLHSPositiveOrZero = LHS.From() >= Zero;
+    bool IsRHSPositiveOrZero = RHS.From() >= Zero;
+
+    // Remainder operator results with negative operands is implementation
+    // defined.  Positive cases are much easier to reason about though.
+    if (IsLHSPositiveOrZero && IsRHSPositiveOrZero) {
+      // If maximal value of LHS is less than maximal value of RHS,
+      // the result won't get greater than LHS.To().
+      Max = std::min(LHS.To(), Max);
+      // We want to check if it is a situation similar to the following:
+      //
+      // <------------|---[  LHS  ]--------[  RHS  ]----->
+      //  -INF        0                              +INF
+      //
+      // In this situation, we can conclude that (LHS / RHS) == 0 and
+      // (LHS % RHS) == LHS.
+      Min = LHS.To() < RHS.From() ? LHS.From() : Zero;
+    }
+
+    return {RangeFactory, ValueFactory.getValue(Min),
+            ValueFactory.getValue(Max)};
   }
 
   /// Return a range set subtracting zero from \p Domain.
