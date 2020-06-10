@@ -16,6 +16,7 @@
 #include "clang/StaticAnalyzer/Core/PathSensitive/ProgramState.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ProgramStateTrait.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/SimpleConstraintManager.h"
+#include "llvm/ADT/APSInt.h"
 
 namespace clang {
 
@@ -126,6 +127,8 @@ public:
   RangeSet Intersect(BasicValueFactory &BV, Factory &F,
                      const RangeSet &Other) const;
   RangeSet Negate(BasicValueFactory &BV, Factory &F) const;
+  RangeSet Delete(BasicValueFactory &BV, Factory &F,
+                  const llvm::APSInt &Point) const;
 
   void print(raw_ostream &os) const;
 
@@ -139,10 +142,9 @@ using ConstraintRangeTy = llvm::ImmutableMap<SymbolRef, RangeSet>;
 
 template <>
 struct ProgramStateTrait<ConstraintRange>
-  : public ProgramStatePartialTrait<ConstraintRangeTy> {
+    : public ProgramStatePartialTrait<ConstraintRangeTy> {
   static void *GDMIndex();
 };
-
 
 class RangedConstraintManager : public SimpleConstraintManager {
 public:
@@ -169,8 +171,8 @@ public:
 protected:
   /// Assume a constraint between a symbolic expression and a concrete integer.
   virtual ProgramStateRef assumeSymRel(ProgramStateRef State, SymbolRef Sym,
-                               BinaryOperator::Opcode op,
-                               const llvm::APSInt &Int);
+                                       BinaryOperator::Opcode op,
+                                       const llvm::APSInt &Int);
 
   //===------------------------------------------------------------------===//
   // Interface that subclasses must implement.
@@ -218,8 +220,8 @@ private:
   static void computeAdjustment(SymbolRef &Sym, llvm::APSInt &Adjustment);
 };
 
-} // end GR namespace
+} // namespace ento
 
-} // end clang namespace
+} // namespace clang
 
 #endif

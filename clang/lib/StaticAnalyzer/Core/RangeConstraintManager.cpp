@@ -11,12 +11,18 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/AST/OperationKinds.h"
 #include "clang/Basic/JsonSupport.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/APSIntType.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ProgramState.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ProgramStateTrait.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/ProgramState_Fwd.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/RangedConstraintManager.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/SValVisitor.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/SVals.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/SymExpr.h"
+#include "clang/StaticAnalyzer/Core/PathSensitive/SymbolManager.h"
+#include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/ImmutableSet.h"
 #include "llvm/Support/raw_ostream.h"
@@ -89,7 +95,7 @@ public:
   }
 
   TriStateKind getCmpOpState(BinaryOperatorKind CurrentOP,
-                         BinaryOperatorKind QueriedOP) const {
+                             BinaryOperatorKind QueriedOP) const {
     return CmpOpTable[getIndexFromOp(CurrentOP)][getIndexFromOp(QueriedOP)];
   }
 
@@ -364,6 +370,18 @@ RangeSet RangeSet::Negate(BasicValueFactory &BV, Factory &F) const {
   return newRanges;
 }
 
+RangeSet RangeSet::Delete(BasicValueFactory &BV, Factory &F,
+                          const llvm::APSInt &Point) const {
+  llvm::APSInt Upper = Point;
+  llvm::APSInt Lower = Point;
+
+  ++Upper;
+  --Lower;
+
+  // Notice that the lower bound is greater than the upper bound.
+  return Intersect(BV, F, Upper, Lower);
+}
+
 void RangeSet::print(raw_ostream &os) const {
   bool isFirst = true;
   os << "{ ";
@@ -373,13 +391,293 @@ void RangeSet::print(raw_ostream &os) const {
     else
       os << ", ";
 
-    os << '[' << i->From().toString(10) << ", " << i->To().toString(10)
-       << ']';
+    os << '[' << i->From().toString(10) << ", " << i->To().toString(10) << ']';
   }
   os << " }";
 }
 
+REGISTER_SET_FACTORY_WITH_PROGRAMSTATE(SymbolSet, SymbolRef)
+
 namespace {
+class EqualityClass : public llvm::FoldingSetNode {
+public:
+  static inline EqualityClass find(ProgramStateRef State, SymbolRef Sym);
+
+  static inline ProgramStateRef merge(BasicValueFactory &BV,
+                                      RangeSet::Factory &F,
+                                      ProgramStateRef State, SymbolRef First,
+                                      SymbolRef Second);
+
+  inline SymbolSet getClassMembers(ProgramStateRef State);
+  inline bool isTrivial(ProgramStateRef State);
+  inline bool isTriviallyDead(ProgramStateRef State, SymbolReaper &Reaper);
+
+  EqualityClass() = delete;
+  EqualityClass(const EqualityClass &) = default;
+  EqualityClass &operator=(const EqualityClass &) = default;
+  EqualityClass(EqualityClass &&) = default;
+  EqualityClass &operator=(EqualityClass &&) = default;
+
+  bool operator==(const EqualityClass &Other) const { return ID == Other.ID; }
+  bool operator<(const EqualityClass &Other) const { return ID < Other.ID; }
+  bool operator!=(const EqualityClass &Other) const {
+    return !operator==(Other);
+  }
+
+  static void Profile(llvm::FoldingSetNodeID &ID, uintptr_t CID) {
+    ID.AddInteger(CID);
+  }
+
+  void Profile(llvm::FoldingSetNodeID &ID) const { Profile(ID, this->ID); }
+
+private:
+  /* implicit */ EqualityClass(SymbolRef Sym)
+      : ID(reinterpret_cast<uintptr_t>(Sym)) {}
+
+  SymbolRef getRepresentativeSymbol() const {
+    return reinterpret_cast<SymbolRef>(ID);
+  }
+  static inline SymbolSet::Factory &getMembersFactory(ProgramStateRef State);
+
+  static inline ProgramStateRef
+  mergeImpl(BasicValueFactory &BV, RangeSet::Factory &F, ProgramStateRef State,
+            EqualityClass First, SymbolSet FirstMembers, EqualityClass Second,
+            SymbolSet SecondMembers);
+
+  uintptr_t ID;
+};
+
+//===----------------------------------------------------------------------===//
+//                            Intersection functions
+//===----------------------------------------------------------------------===//
+
+template <class HeadTy, class SecondTy, class... RestTy>
+inline Optional<RangeSet> intersect(BasicValueFactory &BV, RangeSet::Factory &F,
+                                    HeadTy Head, SecondTy Second,
+                                    RestTy... Tail);
+
+template <class SecondTy, class... RestTy>
+inline Optional<RangeSet> intersect(BasicValueFactory &BV, RangeSet::Factory &F,
+                                    RangeSet Head, SecondTy Second,
+                                    RestTy... Tail);
+
+LLVM_ATTRIBUTE_UNUSED inline Optional<RangeSet>
+intersect(BasicValueFactory &BV, RangeSet::Factory &F, const RangeSet *End) {
+  if (End) {
+    return *End;
+  }
+  return llvm::None;
+}
+
+template <class EndTy>
+inline Optional<RangeSet> intersect(BasicValueFactory &BV, RangeSet::Factory &F,
+                                    EndTy End) {
+  return End;
+}
+
+template <class... RestTy>
+inline Optional<RangeSet> intersect(BasicValueFactory &BV, RangeSet::Factory &F,
+                                    RangeSet Head, RangeSet Second,
+                                    RestTy... Tail) {
+  return intersect(BV, F, Head.Intersect(BV, F, Second), Tail...);
+}
+
+template <class SecondTy, class... RestTy>
+inline Optional<RangeSet> intersect(BasicValueFactory &BV, RangeSet::Factory &F,
+                                    RangeSet Head, SecondTy Second,
+                                    RestTy... Tail) {
+  if (Second) {
+    return intersect(BV, F, Head, *Second, Tail...);
+  }
+  return intersect(BV, F, Head, Tail...);
+}
+
+template <class HeadTy, class SecondTy, class... RestTy>
+inline Optional<RangeSet> intersect(BasicValueFactory &BV, RangeSet::Factory &F,
+                                    HeadTy Head, SecondTy Second,
+                                    RestTy... Tail) {
+  if (Head) {
+    return intersect(BV, F, *Head, Second, Tail...);
+  }
+  return intersect(BV, F, Second, Tail...);
+}
+
+} // end anonymous namespace
+
+REGISTER_MAP_WITH_PROGRAMSTATE(EqualityMap, SymbolRef, EqualityClass)
+REGISTER_MAP_WITH_PROGRAMSTATE(EqualityMembers, EqualityClass, SymbolSet)
+REGISTER_MAP_WITH_PROGRAMSTATE(ConstraintRangeNew, EqualityClass, RangeSet)
+REGISTER_MAP_WITH_PROGRAMSTATE(InequalityMap, SymbolRef, SymbolSet)
+
+//===----------------------------------------------------------------------===//
+//                             Constraint functions
+//===----------------------------------------------------------------------===//
+
+inline ProgramStateRef setConstraint(ProgramStateRef State, EqualityClass Class,
+                                     RangeSet Constraint) {
+  return State->set<ConstraintRangeNew>(Class, Constraint);
+}
+
+inline ProgramStateRef setConstraint(ProgramStateRef State, SymbolRef Sym,
+                                     RangeSet Constraint) {
+  return setConstraint(State, EqualityClass::find(State, Sym), Constraint);
+}
+
+inline const RangeSet *getConstraint(ProgramStateRef State,
+                                     EqualityClass Class) {
+  return State->get<ConstraintRangeNew>(Class);
+}
+
+inline const RangeSet *getConstraint(ProgramStateRef State, SymbolRef Sym) {
+  return getConstraint(State, EqualityClass::find(State, Sym));
+}
+
+//===----------------------------------------------------------------------===//
+//                     EqualityClass implementation details
+//===----------------------------------------------------------------------===//
+
+inline EqualityClass EqualityClass::find(ProgramStateRef State, SymbolRef Sym) {
+  if (const EqualityClass *PreassignedClass = State->get<EqualityMap>(Sym))
+    return *PreassignedClass;
+
+  // this symbol is a class of its own
+  return Sym;
+}
+
+inline ProgramStateRef EqualityClass::merge(BasicValueFactory &BV,
+                                            RangeSet::Factory &F,
+                                            ProgramStateRef State,
+                                            SymbolRef First, SymbolRef Second) {
+  EqualityClass FirstClass = find(State, First);
+  EqualityClass SecondClass = find(State, Second);
+
+  SymbolSet FirstClassMembers = FirstClass.getClassMembers(State);
+  SymbolSet SecondClassMembers = SecondClass.getClassMembers(State);
+
+  if (FirstClassMembers.getHeight() >= SecondClassMembers.getHeight()) {
+    return mergeImpl(BV, F, State, FirstClass, FirstClassMembers, SecondClass,
+                     SecondClassMembers);
+  } else {
+    return mergeImpl(BV, F, State, SecondClass, SecondClassMembers, FirstClass,
+                     FirstClassMembers);
+  }
+}
+
+inline ProgramStateRef
+EqualityClass::mergeImpl(BasicValueFactory &ValueFactory,
+                         RangeSet::Factory &RangeFactory, ProgramStateRef State,
+                         EqualityClass First, SymbolSet FirstMembers,
+                         EqualityClass Second, SymbolSet SecondMembers) {
+  EqualityMapTy Classes = State->get<EqualityMap>();
+  EqualityMapTy::Factory &CF = State->get_context<EqualityMap>();
+
+  EqualityMembersTy Members = State->get<EqualityMembers>();
+  EqualityMembersTy::Factory &MF = State->get_context<EqualityMembers>();
+
+  ConstraintRangeNewTy Constraints = State->get<ConstraintRangeNew>();
+  ConstraintRangeNewTy::Factory &CRF = State->get_context<ConstraintRangeNew>();
+
+  SymbolSet::Factory &F = getMembersFactory(State);
+  SymbolSet NewClassMembers = FirstMembers;
+  for (SymbolRef Sym : SecondMembers) {
+    NewClassMembers = F.add(NewClassMembers, Sym);
+    Classes = CF.add(Classes, Sym, First);
+  }
+
+  Members = MF.remove(Members, Second);
+  Members = MF.add(Members, First, NewClassMembers);
+
+  State = State->set<EqualityMap>(Classes);
+  State = State->set<EqualityMembers>(Members);
+
+  if (Optional<RangeSet> NewClassConstraint =
+          intersect(ValueFactory, RangeFactory, getConstraint(State, First),
+                    getConstraint(State, Second))) {
+    Constraints = CRF.remove(Constraints, Second);
+    Constraints = CRF.add(Constraints, First, *NewClassConstraint);
+
+    State = State->set<ConstraintRangeNew>(Constraints);
+  }
+
+  return State;
+}
+
+inline SymbolSet::Factory &
+EqualityClass::getMembersFactory(ProgramStateRef State) {
+  return State->get_context<SymbolSet>();
+}
+
+SymbolSet EqualityClass::getClassMembers(ProgramStateRef State) {
+  if (const SymbolSet *Members = State->get<EqualityMembers>(*this))
+    return *Members;
+
+  SymbolSet::Factory &F = getMembersFactory(State);
+  return F.add(F.getEmptySet(), getRepresentativeSymbol());
+}
+
+bool EqualityClass::isTrivial(ProgramStateRef State) {
+  return State->get<EqualityMembers>(*this) == nullptr;
+}
+
+bool EqualityClass::isTriviallyDead(ProgramStateRef State,
+                                    SymbolReaper &Reaper) {
+  return isTrivial(State) && Reaper.isDead(getRepresentativeSymbol());
+}
+
+namespace {
+
+inline bool isZero(const llvm::APSInt &Int) {
+  APSIntType Type(Int);
+  return Int == Type.getZeroValue();
+}
+
+//===----------------------------------------------------------------------===//
+//                               Equality tracker
+//===----------------------------------------------------------------------===//
+
+/// A small helper structure representing symbolic equality
+struct EqualityInfo {
+public:
+  SymbolRef Left, Right;
+  bool IsEquality = true;
+
+  void invert() { IsEquality = !IsEquality; }
+  static Optional<EqualityInfo> extract(SymbolRef Sym, const llvm::APSInt &Int,
+                                        const llvm::APSInt &Adjustment) {
+    if (!isZero(Int) || !isZero(Adjustment))
+      return llvm::None;
+
+    return extract(Sym);
+  }
+  static Optional<EqualityInfo> extract(SymbolRef Sym) {
+    return EqualityExtractor().Visit(Sym);
+  }
+
+private:
+  class EqualityExtractor
+      : public SymExprVisitor<EqualityExtractor, Optional<EqualityInfo>> {
+  public:
+    Optional<EqualityInfo> VisitSymSymExpr(const SymSymExpr *Sym) const {
+      switch (Sym->getOpcode()) {
+      case BO_Sub:
+        return EqualityInfo{Sym->getLHS(), Sym->getRHS(), false};
+      case BO_EQ:
+        return EqualityInfo{Sym->getLHS(), Sym->getRHS(), true};
+      default:
+        return llvm::None;
+      }
+    }
+  };
+};
+
+void print(const SymbolSet &Set) {
+  llvm::errs() << "{";
+  for (const auto &X : Set) {
+    X->dump();
+    llvm::errs() << ", ";
+  }
+  llvm::errs() << "}";
+}
 
 /// A little component aggregating all of the reasoning we have about
 /// the ranges of symbolic expressions.
@@ -442,33 +740,25 @@ private:
   }
 
   RangeSet infer(SymbolRef Sym) {
-    const RangeSet *AssociatedRange = State->get<ConstraintRange>(Sym);
-
-    // If Sym is a difference of symbols A - B, then maybe we have range set
-    // stored for B - A.
-    const RangeSet *RangeAssociatedWithNegatedSym =
-        getRangeForMinusSymbol(State, Sym);
-
-    // If we have range set stored for both A - B and B - A then calculate the
-    // effective range set by intersecting the range set for A - B and the
-    // negated range set of B - A.
-    if (AssociatedRange && RangeAssociatedWithNegatedSym)
-      return AssociatedRange->Intersect(
-          ValueFactory, RangeFactory,
-          RangeAssociatedWithNegatedSym->Negate(ValueFactory, RangeFactory));
-
-    if (AssociatedRange)
-      return *AssociatedRange;
-
-    if (RangeAssociatedWithNegatedSym)
-      return RangeAssociatedWithNegatedSym->Negate(ValueFactory, RangeFactory);
+    if (Optional<RangeSet> ConstraintBasedRange = intersect(
+            ValueFactory, RangeFactory, getConstraint(State, Sym),
+            // If Sym is a difference of symbols A - B, then maybe we have range
+            // set stored for B - A.
+            //
+            // If we have range set stored for both A - B and B - A then
+            // calculate the effective range set by intersecting the range set
+            // for A - B and the negated range set of B - A.
+            getRangeForInvertedSub(State, Sym),
+            getRangeForEqualities(State, Sym))) {
+      return *ConstraintBasedRange;
+    }
 
     // If Sym is a comparison expression (except <=>),
     // find any other comparisons with the same operands.
     // See function description.
-    const RangeSet CmpRangeSet = getRangeForComparisonSymbol(State, Sym);
-    if (!CmpRangeSet.isEmpty())
-      return CmpRangeSet;
+    if (Optional<RangeSet> CmpRangeSet =
+            getRangeForComparisonSymbol(State, Sym))
+      return *CmpRangeSet;
 
     return Visit(Sym);
   }
@@ -621,8 +911,24 @@ private:
   /// Return a range set subtracting zero from \p Domain.
   RangeSet assumeNonZero(RangeSet Domain, QualType T) {
     APSIntType IntType = ValueFactory.getAPSIntType(T);
-    return Domain.Intersect(ValueFactory, RangeFactory,
-                            ++IntType.getZeroValue(), --IntType.getZeroValue());
+    return Domain.Delete(ValueFactory, RangeFactory, IntType.getZeroValue());
+  }
+
+  RangeSet deletePointsFromUnequalSymbols(ProgramStateRef State, SymbolRef Sym,
+                                          RangeSet Original) {
+    RangeSet Result = Original;
+    const SymbolSet *UnequalSymbols = State->get<InequalityMap>(Sym);
+
+    if (!UnequalSymbols)
+      return Result;
+
+    for (SymbolRef UnequalSym : *UnequalSymbols) {
+      if (const RangeSet *UnequalRange = getConstraint(State, UnequalSym))
+        if (const llvm::APSInt *Point = UnequalRange->getConcreteValue())
+          Result = Result.Delete(ValueFactory, RangeFactory, *Point);
+    }
+
+    return Result;
   }
 
   // FIXME: Once SValBuilder supports unary minus, we should use SValBuilder to
@@ -630,23 +936,27 @@ private:
   //        symbol manually. This will allow us to support finding ranges of not
   //        only negated SymSymExpr-type expressions, but also of other, simpler
   //        expressions which we currently do not know how to negate.
-  const RangeSet *getRangeForMinusSymbol(ProgramStateRef State, SymbolRef Sym) {
+  Optional<RangeSet> getRangeForInvertedSub(ProgramStateRef State,
+                                            SymbolRef Sym) {
     if (const SymSymExpr *SSE = dyn_cast<SymSymExpr>(Sym)) {
       if (SSE->getOpcode() == BO_Sub) {
         QualType T = Sym->getType();
+
+        // Do not negate unsigned ranges
+        if (!T->isUnsignedIntegerOrEnumerationType() &&
+            !T->isSignedIntegerOrEnumerationType())
+          return llvm::None;
+
         SymbolManager &SymMgr = State->getSymbolManager();
-        SymbolRef negSym =
+        SymbolRef NegatedSym =
             SymMgr.getSymSymExpr(SSE->getRHS(), BO_Sub, SSE->getLHS(), T);
 
-        if (const RangeSet *negV = State->get<ConstraintRange>(negSym)) {
-          // Unsigned range set cannot be negated, unless it is [0, 0].
-          if (T->isUnsignedIntegerOrEnumerationType() ||
-              T->isSignedIntegerOrEnumerationType())
-            return negV;
+        if (const RangeSet *NegatedRange = getConstraint(State, NegatedSym)) {
+          return NegatedRange->Negate(ValueFactory, RangeFactory);
         }
       }
     }
-    return nullptr;
+    return llvm::None;
   }
 
   // Returns ranges only for binary comparison operators (except <=>)
@@ -659,18 +969,17 @@ private:
   // It covers all possible combinations (see CmpOpTable description).
   // Note that `x` and `y` can also stand for subexpressions,
   // not only for actual symbols.
-  RangeSet getRangeForComparisonSymbol(ProgramStateRef State, SymbolRef Sym) {
-    const RangeSet EmptyRangeSet = RangeFactory.getEmptySet();
-
-    auto SSE = dyn_cast<SymSymExpr>(Sym);
+  Optional<RangeSet> getRangeForComparisonSymbol(ProgramStateRef State,
+                                                 SymbolRef Sym) {
+    const auto *SSE = dyn_cast<SymSymExpr>(Sym);
     if (!SSE)
-      return EmptyRangeSet;
+      return llvm::None;
 
     BinaryOperatorKind CurrentOP = SSE->getOpcode();
 
     // We currently do not support <=> (C++20).
     if (!BinaryOperator::isComparisonOp(CurrentOP) || (CurrentOP == BO_Cmp))
-      return EmptyRangeSet;
+      return llvm::None;
 
     static const OperatorRelationsTable CmpOpTable;
 
@@ -681,8 +990,8 @@ private:
     SymbolManager &SymMgr = State->getSymbolManager();
     const llvm::APSInt &Zero = ValueFactory.getValue(0, T);
     const llvm::APSInt &One = ValueFactory.getValue(1, T);
-    const RangeSet TrueRangeSet(RangeFactory, One, One);
-    const RangeSet FalseRangeSet(RangeFactory, Zero, Zero);
+    const RangeSet TrueRangeSet(RangeFactory, One);
+    const RangeSet FalseRangeSet(RangeFactory, Zero);
 
     int UnknownStates = 0;
 
@@ -693,7 +1002,7 @@ private:
       // Let's find an expression e.g. (x < y).
       BinaryOperatorKind QueriedOP = OperatorRelationsTable::getOpFromIndex(i);
       const SymSymExpr *SymSym = SymMgr.getSymSymExpr(LHS, QueriedOP, RHS, T);
-      const RangeSet *QueriedRangeSet = State->get<ConstraintRange>(SymSym);
+      const RangeSet *QueriedRangeSet = getConstraint(State, SymSym);
 
       // If ranges were not previously found,
       // try to find a reversed expression (y > x).
@@ -701,7 +1010,7 @@ private:
         const BinaryOperatorKind ROP =
             BinaryOperator::reverseComparisonOp(QueriedOP);
         SymSym = SymMgr.getSymSymExpr(RHS, ROP, LHS, T);
-        QueriedRangeSet = State->get<ConstraintRange>(SymSym);
+        QueriedRangeSet = getConstraint(State, SymSym);
       }
 
       if (!QueriedRangeSet || QueriedRangeSet->isEmpty())
@@ -736,13 +1045,46 @@ private:
                                                            : FalseRangeSet;
     }
 
-    return EmptyRangeSet;
+    return llvm::None;
+  }
+
+  Optional<RangeSet> getRangeForEqualities(ProgramStateRef State,
+                                           SymbolRef Sym) {
+    Optional<EqualityInfo> Equality = EqualityInfo::extract(Sym);
+    if (!Equality)
+      return llvm::None;
+
+    EqualityClass LHS = EqualityClass::find(State, Equality->Left);
+    EqualityClass RHS = EqualityClass::find(State, Equality->Right);
+
+    if (LHS != RHS)
+      return llvm::None;
+
+    if (Equality->IsEquality) {
+      return getTrueRange(Sym->getType());
+    }
+
+    return getFalseRange(Sym->getType());
+  }
+
+  RangeSet getTrueRange(QualType T) {
+    RangeSet TypeRange = infer(T);
+    return assumeNonZero(TypeRange, T);
+  }
+
+  RangeSet getFalseRange(QualType T) {
+    const llvm::APSInt &Zero = ValueFactory.getValue(0, T);
+    return RangeSet(RangeFactory, Zero);
   }
 
   BasicValueFactory &ValueFactory;
   RangeSet::Factory &RangeFactory;
   ProgramStateRef State;
 };
+
+//===----------------------------------------------------------------------===//
+//               Range-based reasoning about symbolic operations
+//===----------------------------------------------------------------------===//
 
 template <>
 RangeSet SymbolicRangeInferrer::VisitBinaryOperator<BO_Or>(Range LHS, Range RHS,
@@ -904,6 +1246,10 @@ RangeSet SymbolicRangeInferrer::VisitBinaryOperator<BO_Rem>(Range LHS,
   return {RangeFactory, ValueFactory.getValue(Min), ValueFactory.getValue(Max)};
 }
 
+//===----------------------------------------------------------------------===//
+//                  Constraint manager implementation details
+//===----------------------------------------------------------------------===//
+
 class RangeConstraintManager : public RangedConstraintManager {
 public:
   RangeConstraintManager(ExprEngine *EE, SValBuilder &SVB)
@@ -915,7 +1261,7 @@ public:
 
   bool haveEqualConstraints(ProgramStateRef S1,
                             ProgramStateRef S2) const override {
-    return S1->get<ConstraintRange>() == S2->get<ConstraintRange>();
+    return S1->get<ConstraintRangeNew>() == S2->get<ConstraintRangeNew>();
   }
 
   bool canReasonAbout(SVal X) const override;
@@ -987,6 +1333,47 @@ private:
   RangeSet getSymGERange(ProgramStateRef St, SymbolRef Sym,
                          const llvm::APSInt &Int,
                          const llvm::APSInt &Adjustment);
+
+  //===------------------------------------------------------------------===//
+  // Equality tracking implementation
+  //===------------------------------------------------------------------===//
+
+  ProgramStateRef trackEQ(ProgramStateRef State, SymbolRef Sym,
+                          const llvm::APSInt &Int,
+                          const llvm::APSInt &Adjustment) {
+    if (auto Equality = EqualityInfo::extract(Sym, Int, Adjustment)) {
+      Equality->invert();
+      return track(State, *Equality);
+    }
+
+    return State;
+  }
+
+  ProgramStateRef trackNE(ProgramStateRef State, SymbolRef Sym,
+                          const llvm::APSInt &Int,
+                          const llvm::APSInt &Adjustment) {
+    if (auto Equality = EqualityInfo::extract(Sym, Int, Adjustment)) {
+      return track(State, *Equality);
+    }
+
+    return State;
+  }
+
+  ProgramStateRef track(ProgramStateRef State, EqualityInfo ToTrack) {
+    if (ToTrack.IsEquality) {
+      return trackEquality(State, ToTrack.Left, ToTrack.Right);
+    }
+    return trackInequality(State, ToTrack.Left, ToTrack.Right);
+  }
+
+  ProgramStateRef trackInequality(ProgramStateRef State, SymbolRef LHS,
+                                  SymbolRef RHS) {
+    // TODO: track inequalities
+    return State;
+  }
+
+  ProgramStateRef trackEquality(ProgramStateRef State, SymbolRef LHS,
+                                SymbolRef RHS);
 };
 
 } // end anonymous namespace
@@ -1031,9 +1418,7 @@ bool RangeConstraintManager::canReasonAbout(SVal X) const {
         // We've recently started producing Loc <> NonLoc comparisons (that
         // result from casts of one of the operands between eg. intptr_t and
         // void *), but we can't reason about them yet.
-        if (Loc::isLocType(SSE->getLHS()->getType())) {
-          return Loc::isLocType(SSE->getRHS()->getType());
-        }
+        return true;
       }
     }
 
@@ -1045,7 +1430,7 @@ bool RangeConstraintManager::canReasonAbout(SVal X) const {
 
 ConditionTruthVal RangeConstraintManager::checkNull(ProgramStateRef State,
                                                     SymbolRef Sym) {
-  const RangeSet *Ranges = State->get<ConstraintRange>(Sym);
+  const RangeSet *Ranges = getConstraint(State, Sym);
 
   // If we don't have any information about this symbol, it's underconstrained.
   if (!Ranges)
@@ -1069,28 +1454,100 @@ ConditionTruthVal RangeConstraintManager::checkNull(ProgramStateRef State,
 
 const llvm::APSInt *RangeConstraintManager::getSymVal(ProgramStateRef St,
                                                       SymbolRef Sym) const {
-  const ConstraintRangeTy::data_type *T = St->get<ConstraintRange>(Sym);
+  const ConstraintRangeTy::data_type *T = getConstraint(St, Sym);
   return T ? T->getConcreteValue() : nullptr;
 }
+
+//===----------------------------------------------------------------------===//
+//                Remove dead symbols from existing constraints
+//===----------------------------------------------------------------------===//
 
 /// Scan all symbols referenced by the constraints. If the symbol is not alive
 /// as marked in LSymbols, mark it as dead in DSymbols.
 ProgramStateRef
 RangeConstraintManager::removeDeadBindings(ProgramStateRef State,
                                            SymbolReaper &SymReaper) {
-  bool Changed = false;
-  ConstraintRangeTy CR = State->get<ConstraintRange>();
-  ConstraintRangeTy::Factory &CRFactory = State->get_context<ConstraintRange>();
+  EqualityMembersTy ClassMembersMap = State->get<EqualityMembers>();
+  EqualityMembersTy NewClassMembersMap = ClassMembersMap;
+  EqualityMembersTy::Factory &EMFactory = State->get_context<EqualityMembers>();
+  SymbolSet::Factory &SetFactory = State->get_context<SymbolSet>();
 
-  for (ConstraintRangeTy::iterator I = CR.begin(), E = CR.end(); I != E; ++I) {
-    SymbolRef Sym = I.getKey();
-    if (SymReaper.isDead(Sym)) {
-      Changed = true;
-      CR = CRFactory.remove(CR, Sym);
+  ConstraintRangeNewTy Constraints = State->get<ConstraintRangeNew>();
+  ConstraintRangeNewTy NewConstraints = Constraints;
+  ConstraintRangeNewTy::Factory &ConstraintFactory =
+      State->get_context<ConstraintRangeNew>();
+
+  EqualityMapTy ClassMap = State->get<EqualityMap>();
+  EqualityMapTy NewClassMap = ClassMap;
+  EqualityMapTy::Factory &ClassFactory = State->get_context<EqualityMap>();
+
+  bool ClassMapChanged = false;
+  bool MembersMapChanged = false;
+  bool ConstraintMapChanged = false;
+
+  for (std::pair<EqualityClass, RangeSet> ClassConstraintPair : Constraints) {
+    EqualityClass Class = ClassConstraintPair.first;
+    if (Class.isTriviallyDead(State, SymReaper)) {
+      // If this class is trivial, we can remove its constraints right away.
+      Constraints = ConstraintFactory.remove(Constraints, Class);
+      ConstraintMapChanged = true;
     }
   }
 
-  return Changed ? State->set<ConstraintRange>(CR) : State;
+  for (std::pair<SymbolRef, EqualityClass> SymbolClassPair : ClassMap) {
+    SymbolRef Sym = SymbolClassPair.first;
+
+    if (SymReaper.isDead(Sym)) {
+      ClassMapChanged = true;
+      NewClassMap = ClassFactory.remove(NewClassMap, Sym);
+    }
+  }
+
+  for (std::pair<EqualityClass, SymbolSet> ClassMembersPair : ClassMembersMap) {
+    SymbolSet LiveMembers = ClassMembersPair.second;
+    bool MembersChanged = false;
+    for (SymbolRef Member : ClassMembersPair.second) {
+      if (SymReaper.isDead(Member)) {
+        MembersChanged = true;
+        LiveMembers = SetFactory.remove(LiveMembers, Member);
+      }
+    }
+
+    llvm::errs() << "New set:";
+    print(LiveMembers);
+    llvm::errs() << "\n";
+
+    if (!MembersChanged)
+      continue;
+
+    MembersMapChanged = true;
+
+    if (LiveMembers.isEmpty()) {
+      // the class is dead now, we need to wipe it out of the members map...
+      NewClassMembersMap =
+          EMFactory.remove(NewClassMembersMap, ClassMembersPair.first);
+
+      // ...and remove all of its constraints
+      Constraints =
+          ConstraintFactory.remove(Constraints, ClassMembersPair.first);
+      ConstraintMapChanged = true;
+    } else {
+      // we need to change the members associated with the class
+      NewClassMembersMap = EMFactory.add(NewClassMembersMap,
+                                         ClassMembersPair.first, LiveMembers);
+    }
+  }
+
+  if (ClassMapChanged)
+    State = State->set<EqualityMap>(NewClassMap);
+
+  if (MembersMapChanged)
+    State = State->set<EqualityMembers>(NewClassMembersMap);
+
+  if (ConstraintMapChanged)
+    State = State->set<ConstraintRangeNew>(Constraints);
+
+  return State;
 }
 
 RangeSet RangeConstraintManager::getRange(ProgramStateRef State,
@@ -1119,15 +1576,17 @@ RangeConstraintManager::assumeSymNE(ProgramStateRef St, SymbolRef Sym,
   if (AdjustmentType.testInRange(Int, true) != APSIntType::RTR_Within)
     return St;
 
-  llvm::APSInt Lower = AdjustmentType.convert(Int) - Adjustment;
-  llvm::APSInt Upper = Lower;
-  --Lower;
-  ++Upper;
+  llvm::APSInt Point = AdjustmentType.convert(Int) - Adjustment;
 
   // [Int-Adjustment+1, Int-Adjustment-1]
-  // Notice that the lower bound is greater than the upper bound.
-  RangeSet New = getRange(St, Sym).Intersect(getBasicVals(), F, Upper, Lower);
-  return New.isEmpty() ? nullptr : St->set<ConstraintRange>(Sym, New);
+  RangeSet New = getRange(St, Sym).Delete(getBasicVals(), F, Point);
+
+  if (New.isEmpty())
+    // this is infeasible assumption
+    return nullptr;
+
+  ProgramStateRef NewState = setConstraint(St, Sym, New);
+  return trackNE(NewState, Sym, Int, Adjustment);
 }
 
 ProgramStateRef
@@ -1142,7 +1601,13 @@ RangeConstraintManager::assumeSymEQ(ProgramStateRef St, SymbolRef Sym,
   // [Int-Adjustment, Int-Adjustment]
   llvm::APSInt AdjInt = AdjustmentType.convert(Int) - Adjustment;
   RangeSet New = getRange(St, Sym).Intersect(getBasicVals(), F, AdjInt, AdjInt);
-  return New.isEmpty() ? nullptr : St->set<ConstraintRange>(Sym, New);
+
+  if (New.isEmpty())
+    // this is infeasible assumption
+    return nullptr;
+
+  ProgramStateRef NewState = setConstraint(St, Sym, New);
+  return trackEQ(NewState, Sym, Int, Adjustment);
 }
 
 RangeSet RangeConstraintManager::getSymLTRange(ProgramStateRef St,
@@ -1178,7 +1643,7 @@ RangeConstraintManager::assumeSymLT(ProgramStateRef St, SymbolRef Sym,
                                     const llvm::APSInt &Int,
                                     const llvm::APSInt &Adjustment) {
   RangeSet New = getSymLTRange(St, Sym, Int, Adjustment);
-  return New.isEmpty() ? nullptr : St->set<ConstraintRange>(Sym, New);
+  return New.isEmpty() ? nullptr : setConstraint(St, Sym, New);
 }
 
 RangeSet RangeConstraintManager::getSymGTRange(ProgramStateRef St,
@@ -1214,7 +1679,7 @@ RangeConstraintManager::assumeSymGT(ProgramStateRef St, SymbolRef Sym,
                                     const llvm::APSInt &Int,
                                     const llvm::APSInt &Adjustment) {
   RangeSet New = getSymGTRange(St, Sym, Int, Adjustment);
-  return New.isEmpty() ? nullptr : St->set<ConstraintRange>(Sym, New);
+  return New.isEmpty() ? nullptr : setConstraint(St, Sym, New);
 }
 
 RangeSet RangeConstraintManager::getSymGERange(ProgramStateRef St,
@@ -1250,13 +1715,13 @@ RangeConstraintManager::assumeSymGE(ProgramStateRef St, SymbolRef Sym,
                                     const llvm::APSInt &Int,
                                     const llvm::APSInt &Adjustment) {
   RangeSet New = getSymGERange(St, Sym, Int, Adjustment);
-  return New.isEmpty() ? nullptr : St->set<ConstraintRange>(Sym, New);
+  return New.isEmpty() ? nullptr : setConstraint(St, Sym, New);
 }
 
-RangeSet RangeConstraintManager::getSymLERange(
-      llvm::function_ref<RangeSet()> RS,
-      const llvm::APSInt &Int,
-      const llvm::APSInt &Adjustment) {
+RangeSet
+RangeConstraintManager::getSymLERange(llvm::function_ref<RangeSet()> RS,
+                                      const llvm::APSInt &Int,
+                                      const llvm::APSInt &Adjustment) {
   // Before we do any real work, see if the value can even show up.
   APSIntType AdjustmentType(Adjustment);
   switch (AdjustmentType.testInRange(Int, true)) {
@@ -1293,7 +1758,7 @@ RangeConstraintManager::assumeSymLE(ProgramStateRef St, SymbolRef Sym,
                                     const llvm::APSInt &Int,
                                     const llvm::APSInt &Adjustment) {
   RangeSet New = getSymLERange(St, Sym, Int, Adjustment);
-  return New.isEmpty() ? nullptr : St->set<ConstraintRange>(Sym, New);
+  return New.isEmpty() ? nullptr : setConstraint(St, Sym, New);
 }
 
 ProgramStateRef RangeConstraintManager::assumeSymWithinInclusiveRange(
@@ -1303,7 +1768,7 @@ ProgramStateRef RangeConstraintManager::assumeSymWithinInclusiveRange(
   if (New.isEmpty())
     return nullptr;
   RangeSet Out = getSymLERange([&] { return New; }, To, Adjustment);
-  return Out.isEmpty() ? nullptr : State->set<ConstraintRange>(Sym, Out);
+  return Out.isEmpty() ? nullptr : setConstraint(State, Sym, Out);
 }
 
 ProgramStateRef RangeConstraintManager::assumeSymOutsideInclusiveRange(
@@ -1312,7 +1777,13 @@ ProgramStateRef RangeConstraintManager::assumeSymOutsideInclusiveRange(
   RangeSet RangeLT = getSymLTRange(State, Sym, From, Adjustment);
   RangeSet RangeGT = getSymGTRange(State, Sym, To, Adjustment);
   RangeSet New(RangeLT.addRange(F, RangeGT));
-  return New.isEmpty() ? nullptr : State->set<ConstraintRange>(Sym, New);
+  return New.isEmpty() ? nullptr : setConstraint(State, Sym, New);
+}
+
+ProgramStateRef RangeConstraintManager::trackEquality(ProgramStateRef State,
+                                                      SymbolRef LHS,
+                                                      SymbolRef RHS) {
+  return EqualityClass::merge(getBasicVals(), F, State, LHS, RHS);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1322,7 +1793,7 @@ ProgramStateRef RangeConstraintManager::assumeSymOutsideInclusiveRange(
 void RangeConstraintManager::printJson(raw_ostream &Out, ProgramStateRef State,
                                        const char *NL, unsigned int Space,
                                        bool IsDot) const {
-  ConstraintRangeTy Constraints = State->get<ConstraintRange>();
+  ConstraintRangeNewTy Constraints = State->get<ConstraintRangeNew>();
 
   Indent(Out, Space, IsDot) << "\"constraints\": ";
   if (Constraints.isEmpty()) {
@@ -1332,17 +1803,24 @@ void RangeConstraintManager::printJson(raw_ostream &Out, ProgramStateRef State,
 
   ++Space;
   Out << '[' << NL;
-  for (ConstraintRangeTy::iterator I = Constraints.begin();
-       I != Constraints.end(); ++I) {
-    Indent(Out, Space, IsDot)
-        << "{ \"symbol\": \"" << I.getKey() << "\", \"range\": \"";
-    I.getData().print(Out);
-    Out << "\" }";
+  bool First = true;
+  for (std::pair<EqualityClass, RangeSet> P : Constraints) {
+    SymbolSet ClassMembers = P.first.getClassMembers(State);
 
-    if (std::next(I) != Constraints.end())
-      Out << ',';
-    Out << NL;
+    for (SymbolRef ClassMember : ClassMembers) {
+      if (First) {
+        First = false;
+      } else {
+        Out << ',';
+        Out << NL;
+      }
+      Indent(Out, Space, IsDot)
+          << "{ \"symbol\": \"" << ClassMember << "\", \"range\": \"";
+      P.second.print(Out);
+      Out << "\" }";
+    }
   }
+  Out << NL;
 
   --Space;
   Indent(Out, Space, IsDot) << "]," << NL;
