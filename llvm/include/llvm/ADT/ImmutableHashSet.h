@@ -57,10 +57,7 @@ constexpr count_t getMaxDepth(bits_t Bits) {
   return (sizeof(hash_t) * 8u + Bits - 1u) / Bits;
 }
 
-constexpr shift_t getMaxShift(bits_t Bits) {
-  return (getMaxDepth(Bits) - 1) * Bits;
-}
-
+constexpr shift_t getMaxShift(bits_t Bits) { return getMaxDepth(Bits) * Bits; }
 template <class ValueInfo> class HAMT {
   using value_type = typename ValueInfo::value_type;
   using const_value_type = typename ValueInfo::const_value_type;
@@ -124,6 +121,8 @@ template <class ValueInfo> class HAMT {
         llvm::copy(Original->getCollisions(), NewNode->getCollisions().begin());
         NewNode->getCollisions()[NewSize - 1] = NewElement;
 
+        D(llvm::errs() << "New size: " << NewSize << "\n");
+
         return NewNode;
       }
 
@@ -170,6 +169,7 @@ template <class ValueInfo> class HAMT {
         Node *NewNode = allocate<InnerNode>(DesugaredOriginal.Size);
 
         InnerNode &DesugaredNew = NewNode->Impl.Inner;
+        DesugaredNew.Size = DesugaredOriginal.Size;
         DesugaredNew.NodeMap = DesugaredOriginal.NodeMap;
         DesugaredNew.DataMap = DesugaredOriginal.DataMap;
         llvm::copy(Original->getAllChildren(),
@@ -190,7 +190,6 @@ template <class ValueInfo> class HAMT {
           hash_t ShiftedMask = (hash_t)getMask(Bits) << Shift;
           D(errs() << "Population " << countPopulation(ShiftedMask)
                    << ", shift " << Shift << "\n");
-          assert(countPopulation(ShiftedMask) == Bits);
           hash_t FirstIndex = FirstHash & ShiftedMask;
           hash_t SecondIndex = SecondHash & ShiftedMask;
           D(errs() << "First " << (FirstIndex >> Shift) << ", Second "
@@ -384,6 +383,10 @@ template <class ValueInfo> class HAMT {
               Impl.Inner.Size};
     }
 
+    MutableArrayRef<NodePtr> getInnerChildren() {
+      return getAllChildren().slice(0, countPopulation(getNodeMap()));
+    }
+
     NodePtr &getInnerChild(count_t Offset) { return getAllChildren()[Offset]; }
 
     NodePtr &getDataChild(count_t Offset) {
@@ -430,7 +433,7 @@ public:
       if (LLVM_UNLIKELY(Shift == getMaxShift(Bits))) {
         ArrayRef<value_type> Collisions = Node->getCollisions();
 
-        for (count_t Index = 0; Index <= Collisions.size(); ++Index)
+        for (count_t Index = 0; Index < Collisions.size(); ++Index)
           if (ValueInfo::areEqual(Collisions[Index], Element))
             return {NodeFactory.replaceCollision(Node, Element, Index), false};
 
@@ -478,7 +481,7 @@ public:
     hash_t Hash = ValueInfo::getHash(Key);
 
     D(errs() << "Max depth: " << getMaxDepth(Bits) << ", "
-             << "max shift: " << getMaxShift(Bits));
+             << "max shift: " << getMaxShift(Bits) << "\n");
     for (count_t i = 0; i < getMaxDepth(Bits); ++i) {
       count_t Index = Hash & getMask(Bits);
       count_t IndexBit = BitmapType{1u} << Index;
@@ -512,11 +515,66 @@ public:
   size_t getSize() const { return Size; }
 
   bool isEmpty() const { return getSize() == 0; }
+
+  bool isEqual(const HAMT &RHS) const {
+    return getSize() == RHS.getSize() && areTreesEqual(Root, RHS.Root);
+  }
+
+private:
+  static bool areTreesEqual(NodePtr LHS, NodePtr RHS, count_t Depth = 0) {
+    if (LHS == RHS)
+      return true;
+
+    if (Depth == getMaxDepth(Bits)) {
+      return areCollisionsEqual(LHS->getCollisions(), RHS->getCollisions());
+    }
+
+    if (LHS->getNodeMap() != RHS->getNodeMap() ||
+        LHS->getDataMap() != RHS->getDataMap())
+      return false;
+
+    return areInnerNodesEqual(LHS, RHS, Depth);
+  }
+
+  static bool areInnerNodesEqual(NodePtr LHS, NodePtr RHS, count_t Depth) {
+    ArrayRef<NodePtr> LHSInnerNodes = LHS->getInnerChildren();
+    ArrayRef<NodePtr> RHSInnerNodes = RHS->getInnerChildren();
+
+    if (LHSInnerNodes.size() != RHSInnerNodes.size())
+      return false;
+
+    for (std::pair<NodePtr, NodePtr> NodesToCompare :
+         zip(LHSInnerNodes, RHSInnerNodes)) {
+      if (!areTreesEqual(NodesToCompare.first, NodesToCompare.second,
+                         Depth + 1))
+        return false;
+    }
+
+    ArrayRef<NodePtr> LHSDataNodes =
+        LHS->getAllChildren().slice(LHSInnerNodes.size());
+    ArrayRef<NodePtr> RHSDataNodes =
+        RHS->getAllChildren().slice(RHSInnerNodes.size());
+
+    return std::equal(LHSDataNodes.begin(), LHSDataNodes.end(),
+                      RHSDataNodes.begin(), [](NodePtr LHS, NodePtr RHS) {
+                        return ValueInfo::areEqual(LHS->getCollisions()[0],
+                                                   RHS->getCollisions()[0]);
+                      });
+  }
+
+  static bool areCollisionsEqual(ArrayRef<value_type> LHS,
+                                 ArrayRef<value_type> RHS) {
+    return llvm::all_of(LHS, [RHS](const_value_type_ref Needle) {
+      return llvm::find_if(RHS, [Needle](const_value_type_ref Candidate) {
+        return ValueInfo::areEqual(Needle, Candidate);
+      });
+    });
+  }
 };
 
 } // end namespace detail
 
-template <class T> struct ImmutablesHasSetInfo {
+template <class T> struct ImmutableHasSetInfo {
   using value_type = T;
   using const_value_type = const T;
   using value_type_ref = T &;
@@ -532,7 +590,7 @@ template <class T> struct ImmutablesHasSetInfo {
   }
 };
 
-template <class T, class ValueInfo = ImmutablesHasSetInfo<T>>
+template <class T, class ValueInfo = ImmutableHasSetInfo<T>>
 class ImmutableHashSet {
 public:
   using value_type = typename ValueInfo::value_type;
@@ -560,6 +618,14 @@ public:
 
   bool contains(const_value_type_ref Value) const { return Impl.find(Value); }
   size_t getSize() const { return Impl.getSize(); }
+
+  bool operator==(const ImmutableHashSet &RHS) const {
+    return Impl.isEqual(RHS.Impl);
+  }
+
+  bool operator!=(const ImmutableHashSet &RHS) const {
+    return !operator==(RHS);
+  }
 };
 
 } // end namespace llvm
