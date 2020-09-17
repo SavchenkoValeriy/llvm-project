@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/ImmutableHashSet.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include "gtest/gtest.h"
 
@@ -14,7 +15,25 @@ using namespace llvm;
 
 namespace {
 
-template <class T> struct AlwaysCollisionTrait : public ImmutableHasSetInfo<T> {
+template <class Set> std::string toString(const Set &S) {
+  std::string SetRep;
+  llvm::raw_string_ostream SS(SetRep);
+  SS << "{ ";
+  interleave(S, SS, ", ");
+  SS << " }";
+  return SS.str();
+}
+
+// We need it here for better fail diagnostics from gtest.
+template <class T, class Info>
+LLVM_ATTRIBUTE_UNUSED static std::ostream &
+operator<<(std::ostream &OS, const ImmutableHashSet<T, Info> &Set) {
+  return OS << toString(Set);
+}
+
+template <class T> struct DefaultInfo : public ImmutableHasSetInfo<T> {};
+
+template <class T> struct AlwaysCollisionInfo : public ImmutableHasSetInfo<T> {
   static detail::hash_t
   getHash(typename ImmutableHasSetInfo<T>::key_type_ref Key) {
     return 1u;
@@ -22,25 +41,33 @@ template <class T> struct AlwaysCollisionTrait : public ImmutableHasSetInfo<T> {
 };
 
 template <class T>
-struct FrequentCollisionTrait : public ImmutableHasSetInfo<T> {
+struct FrequentCollisionInfo : public ImmutableHasSetInfo<T> {
   static detail::hash_t
   getHash(typename ImmutableHasSetInfo<T>::key_type_ref Key) {
     return ImmutableHasSetInfo<T>::getHash(Key) % 32;
   }
 };
 
-TEST(ImmutableHashSetTest, SimpleAddContainsTest) {
-  using Set = ImmutableHashSet<int>;
-  Set::Factory F;
+template <class Info> class ImmutableHashSetTest : public testing::Test {
+public:
+  using Set = ImmutableHashSet<int, Info>;
+  typename Set::Factory F;
+};
 
-  Set Empty = F.getEmptySet();
+using Infos = ::testing::Types<DefaultInfo<int>, AlwaysCollisionInfo<int>,
+                               FrequentCollisionInfo<int>>;
+TYPED_TEST_CASE(ImmutableHashSetTest, Infos);
+
+TYPED_TEST(ImmutableHashSetTest, SimpleAddContainsTest) {
+  using Set = typename TestFixture::Set;
+  Set Empty = this->F.getEmptySet();
 
   Set OneTwoThree = Empty;
-  OneTwoThree = F.add(OneTwoThree, 1);
+  OneTwoThree = this->F.add(OneTwoThree, 1);
   EXPECT_EQ(OneTwoThree.getSize(), 1u);
-  OneTwoThree = F.add(OneTwoThree, 2);
+  OneTwoThree = this->F.add(OneTwoThree, 2);
   EXPECT_EQ(OneTwoThree.getSize(), 2u);
-  OneTwoThree = F.add(OneTwoThree, 3);
+  OneTwoThree = this->F.add(OneTwoThree, 3);
   EXPECT_EQ(OneTwoThree.getSize(), 3u);
 
   EXPECT_TRUE(OneTwoThree.contains(1));
@@ -48,15 +75,14 @@ TEST(ImmutableHashSetTest, SimpleAddContainsTest) {
   EXPECT_TRUE(OneTwoThree.contains(3));
 }
 
-TEST(ImmutableHashSetTest, ConsecutiveAddContainsTest) {
-  using Set = ImmutableHashSet<int>;
+TYPED_TEST(ImmutableHashSetTest, ConsecutiveAddContainsTest) {
+  using Set = typename TestFixture::Set;
   constexpr int MAX = 10000;
-  Set::Factory F;
 
-  Set Test = F.getEmptySet();
+  Set Test = this->F.getEmptySet();
 
   for (int Element = 0; Element < MAX; ++Element) {
-    Test = F.add(Test, Element);
+    Test = this->F.add(Test, Element);
   }
 
   for (int Element = 0; Element < MAX; ++Element) {
@@ -64,75 +90,84 @@ TEST(ImmutableHashSetTest, ConsecutiveAddContainsTest) {
   }
 }
 
-TEST(ImmutableHashSetTest, ConsecutiveCollisionAddContainsTest) {
-  using Set = ImmutableHashSet<int, AlwaysCollisionTrait<int>>;
-  constexpr int MAX = 100;
-  Set::Factory F;
+TYPED_TEST(ImmutableHashSetTest, SimpleAddEqualsTest) {
+  using Set = typename TestFixture::Set;
 
-  Set Test = F.getEmptySet();
-
-  for (int Element = 0; Element < MAX; ++Element) {
-    Test = F.add(Test, Element);
-  }
-
-  for (int Element = 0; Element < MAX; ++Element) {
-    EXPECT_TRUE(Test.contains(Element)) << " doesn't contain " << Element;
-  }
-}
-
-TEST(ImmutableHashSetTest, ConsecutiveFrequentCollisionAddContainsTest) {
-  using Set = ImmutableHashSet<int, FrequentCollisionTrait<int>>;
-  constexpr int MAX = 10000;
-  Set::Factory F;
-
-  Set Test = F.getEmptySet();
-
-  for (int Element = 0; Element < MAX; ++Element) {
-    Test = F.add(Test, Element);
-  }
-
-  for (int Element = 0; Element < MAX; ++Element) {
-    EXPECT_TRUE(Test.contains(Element)) << " doesn't contain " << Element;
-  }
-}
-
-TEST(ImmutableHashSetTest, SimpleAddEqualsTest) {
-  using Set = ImmutableHashSet<int>;
-  Set::Factory F;
-
-  Set First = F.getEmptySet();
-  Set Second = F.getEmptySet();
-  EXPECT_EQ(First, F.getEmptySet());
-  First = F.add(First, 1);
-  EXPECT_NE(First, F.getEmptySet());
-  Second = F.add(First, 3);
+  Set First = this->F.getEmptySet();
+  Set Second = this->F.getEmptySet();
+  EXPECT_EQ(First, this->F.getEmptySet());
+  First = this->F.add(First, 1);
+  EXPECT_NE(First, this->F.getEmptySet());
+  Second = this->F.add(First, 3);
   EXPECT_NE(First, Second);
-  First = F.add(First, 2);
-  First = F.add(First, 5);
+  First = this->F.add(First, 2);
+  First = this->F.add(First, 5);
   EXPECT_NE(First, Second);
   EXPECT_EQ(First, First);
-  Set Third = F.add(Second, 3);
+  Set Third = this->F.add(Second, 3);
   EXPECT_EQ(Second, Third);
-  First = F.add(First, 3);
-  Third = F.add(Third, 5);
-  Third = F.add(Third, 2);
+  First = this->F.add(First, 3);
+  Third = this->F.add(Third, 5);
+  Third = this->F.add(Third, 2);
   EXPECT_NE(Second, Third);
   EXPECT_EQ(First, Third);
 }
 
-TEST(ImmutableHashSetTest, CollisionEqualsTest) {
-  using Set = ImmutableHashSet<int, AlwaysCollisionTrait<int>>;
-  Set::Factory F;
-  constexpr int MAX = 10;
+TYPED_TEST(ImmutableHashSetTest, EqualsTest) {
+  using Set = typename TestFixture::Set;
+  constexpr int MAX = 1000;
 
-  Set First = F.getEmptySet();
+  Set First = this->F.getEmptySet();
   for (int Element = 0; Element <= MAX; ++Element) {
-    First = F.add(First, Element);
+    First = this->F.add(First, Element);
   }
 
-  Set Second = F.getEmptySet();
+  Set Second = this->F.getEmptySet();
   for (int Element = MAX; Element >= 0; --Element) {
-    Second = F.add(Second, Element);
+    Second = this->F.add(Second, Element);
+  }
+
+  EXPECT_EQ(First, Second);
+}
+
+TYPED_TEST(ImmutableHashSetTest, EmptyIteratorTest) {
+  using Set = typename TestFixture::Set;
+
+  Set Empty = this->F.getEmptySet();
+  for (const int &Value : Empty) {
+    FAIL() << " unexpected value: " << Value;
+  }
+}
+
+TYPED_TEST(ImmutableHashSetTest, IteratorSizeTest) {
+  using Set = typename TestFixture::Set;
+  constexpr int MAX = 1000;
+
+  Set Test = this->F.getEmptySet();
+  for (int Element = 0; Element <= MAX; ++Element) {
+    Test = this->F.add(Test, Element);
+  }
+
+  std::size_t Size = 0;
+  for (LLVM_ATTRIBUTE_UNUSED int Element : Test) {
+    ++Size;
+  }
+
+  EXPECT_EQ(Test.getSize(), Size);
+}
+
+TYPED_TEST(ImmutableHashSetTest, ReIteratorAddTest) {
+  using Set = typename TestFixture::Set;
+  constexpr int MAX = 1000;
+
+  Set First = this->F.getEmptySet();
+  for (int Element = 0; Element <= MAX; ++Element) {
+    First = this->F.add(First, Element);
+  }
+
+  Set Second = this->F.getEmptySet();
+  for (int Element : First) {
+    Second = this->F.add(Second, Element);
   }
 
   EXPECT_EQ(First, Second);

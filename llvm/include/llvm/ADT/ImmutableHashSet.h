@@ -187,7 +187,7 @@ template <class ValueInfo> class HAMT {
              "FirstHash, const_value_type_ref Second, hash_t SecondHash)\n");
         D(errs() << "Merging " << First << " and " << Second << "\n");
         if (LLVM_LIKELY(Shift < getMaxShift(Bits))) {
-          hash_t ShiftedMask = (hash_t)getMask(Bits) << Shift;
+          hash_t ShiftedMask = getMask(Bits) << Shift;
           D(errs() << "Population " << countPopulation(ShiftedMask)
                    << ", shift " << Shift << "\n");
           hash_t FirstIndex = FirstHash & ShiftedMask;
@@ -476,6 +476,127 @@ public:
     typename Node::Factory NodeFactory;
   };
 
+  class Iterator {
+  public:
+    using value_type = const_value_type;
+    using pointer = value_type *;
+    using reference = value_type &;
+
+    struct EndTag {};
+    Iterator(const HAMT &Trie) : Iterator(Trie.Root) {}
+    Iterator(const HAMT &Trie, EndTag Tag) : Iterator(Trie.Root, Tag) {}
+
+    Iterator &operator++() {
+      --Index;
+      walkToLeafs();
+      return *this;
+    }
+
+    Iterator operator++(int) {
+      Iterator Copy = *this;
+      operator++();
+      return Copy;
+    }
+
+    reference operator*() {
+      assert(Index > 0);
+      assert(Depth > 0);
+      count_t RealIndex = Index - 1;
+      if (Depth == getMaxDepth(Bits) + 1) {
+        return getCurrentNode()->getCollisions()[RealIndex];
+      }
+
+      return getCurrentNode()->getAllChildren()[RealIndex]->getCollisions()[0];
+    }
+    pointer operator->() { return &operator*(); }
+
+    bool operator==(const Iterator &RHS) const {
+      return Depth == RHS.Depth &&
+             (Depth == 0 ||
+              (Index == RHS.Index && getCurrentNode() == RHS.getCurrentNode()));
+    }
+    bool operator!=(const Iterator &RHS) const { return !operator==(RHS); }
+
+  private:
+    Iterator(const NodePtr &Root) {
+      assignTopLayer(Root);
+      if (Root) {
+        // Make sure we not on root
+        stepDown();
+        // Walk to data leafs
+        walkToLeafs();
+      }
+    }
+
+    Iterator(const NodePtr &Root, EndTag Tag) { assignTopLayer(Root); }
+
+    void walkToLeafs() {
+      // Check if there are any more data points left in the current layer
+      while (Depth > 0 && Index <= getCurrentLayer().size()) {
+        // We need to walk into other nodes.
+        if (getCurrentLayer().empty()) {
+          // We need to go up:
+          //
+          // 1. Decrease the depth
+          --Depth;
+          // 2. Be sure that we don't traverse any
+          //    data nodes here because we already did.
+          Index = 0;
+          // 3. Remove the node we came from
+          popTopFromTheCurrentLayer();
+        } else {
+          // We need to go down:
+          stepDown();
+        }
+      }
+    }
+
+    void stepDown() {
+      // 1. Increase the depth
+      ++Depth;
+      // 2. Get the element in which we descend
+      NodePtr Dest = getCurrentNode();
+      // 3. Set current layer and data index
+      if (Depth <= getMaxDepth(Bits)) {
+        getCurrentLayer() = Dest->getInnerChildren();
+        Index = Dest->getAllChildren().size();
+      } else {
+        // It is a data node, it doesn't have inner children, and thus,
+        // the layer is empty.
+        getCurrentLayer() = Layer();
+        Index = Dest->getCollisions().size();
+      }
+    }
+
+    using Layer = ArrayRef<NodePtr>;
+
+    void assignTopLayer(const NodePtr &Root) { Layers[0] = Layer(&Root, 1); }
+
+    Layer &getCurrentLayer() { return Layers[Depth]; }
+    const Layer &getCurrentLayer() const { return Layers[Depth]; }
+
+    Layer &getParentLayer() {
+      assert(Depth > 0 && "Couldn't get parent for zero depth");
+      assert(!Layers[Depth - 1].empty() && "Parent layer could not be empty");
+      return Layers[Depth - 1];
+    }
+    const Layer &getParentLayer() const {
+      assert(Depth > 0 && "Couldn't get parent for zero depth");
+      assert(!Layers[Depth - 1].empty() && "Parent layer could not be empty");
+      return Layers[Depth - 1];
+    }
+
+    void popTopFromTheCurrentLayer() {
+      getCurrentLayer() = getCurrentLayer().slice(1);
+    }
+
+    NodePtr getCurrentNode() const { return getParentLayer()[0]; }
+
+    std::array<Layer, getMaxDepth(Bits) + 2> Layers;
+    count_t Depth = 0;
+    count_t Index = 0;
+  };
+
   LLVM_NODISCARD const_value_type *find(key_type_ref Key) const {
     NodePtr Node = Root;
     hash_t Hash = ValueInfo::getHash(Key);
@@ -615,6 +736,10 @@ public:
   private:
     typename Trie::Factory Impl;
   };
+
+  using iterator = typename Trie::Iterator;
+  iterator begin() const { return iterator(Impl); }
+  iterator end() const { return iterator(Impl, typename iterator::EndTag{}); }
 
   bool contains(const_value_type_ref Value) const { return Impl.find(Value); }
   size_t getSize() const { return Impl.getSize(); }
