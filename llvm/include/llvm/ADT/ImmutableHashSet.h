@@ -141,8 +141,31 @@ template <class ValueInfo> class HAMT {
         return NewNode;
       }
 
+      Node *removeCollision(NodePtr Original, count_t Offset) {
+        DataNode &DesugaredOriginal = Original->Impl.Data;
+        assert(DesugaredOriginal.Size > 1 &&
+               "Removing collisions from nodes with only 1 collision");
+
+        const size_t NewSize = DesugaredOriginal.Size - 1;
+        Node *NewNode = allocate<DataNode>(NewSize);
+
+        DataNode &DesugaredNew = NewNode->Impl.Data;
+        DesugaredNew.Size = NewSize;
+
+        ArrayRef<value_type> OriginalCollisions = Original->getCollisions();
+        MutableArrayRef<value_type> NewCollisions = NewNode->getCollisions();
+
+        std::copy_n(OriginalCollisions.begin(), Offset, NewCollisions.begin());
+        // Skip OriginalCollisions[Offset]
+        std::copy(OriginalCollisions.begin() + Offset + 1,
+                  OriginalCollisions.end(), NewCollisions.begin() + Offset);
+
+        return NewNode;
+      }
+
       Node *replaceInnerNode(NodePtr Original, NodePtr NewChild,
                              count_t Offset) {
+        assert(NewChild && "Nodes can't be null");
         D(llvm::errs()
           << "replaceInnerNode(NodePtr Original, NodePtr NewChild, "
              "count_t Offset)\n");
@@ -289,10 +312,51 @@ template <class ValueInfo> class HAMT {
         return NewNode;
       }
 
+      Node *replaceInnerNodeWithData(NodePtr Original, NodePtr NewChild,
+                                     count_t IndexBit, count_t NodeOffset) {
+        assert(NewChild && "Nodes can't be null");
+
+        InnerNode &DesugaredOriginal = Original->Impl.Inner;
+        assert(DesugaredOriginal.NodeMap & IndexBit &&
+               "Index bit should not correspond to data node");
+        assert(!(DesugaredOriginal.DataMap & IndexBit) &&
+               "Should have an inner node for the given index bit");
+        Node *NewNode = allocate<InnerNode>(DesugaredOriginal.Size);
+
+        InnerNode &DesugaredNew = NewNode->Impl.Inner;
+        DesugaredNew.Size = DesugaredOriginal.Size;
+        count_t DataOffset =
+            countPopulation(DesugaredOriginal.DataMap & (IndexBit - 1));
+        count_t CanonicalDataOffset =
+            Original->getCanonicalDataOffset(DataOffset);
+
+        // "Move" given index bit from nodemap...
+        DesugaredNew.NodeMap = DesugaredOriginal.NodeMap ^ IndexBit;
+        // ...to datamap
+        DesugaredNew.DataMap = DesugaredOriginal.DataMap | IndexBit;
+
+        ArrayRef<NodePtr> OriginalChildren = Original->getAllChildren();
+        MutableArrayRef<NodePtr> NewChildren = NewNode->getAllChildren();
+
+        std::copy_n(OriginalChildren.begin(), NodeOffset, NewChildren.begin());
+        // Skip OriginalChildren[NodeOffset] because this is the
+        // element we are replacing here.
+        std::copy(OriginalChildren.begin() + NodeOffset + 1,
+                  OriginalChildren.begin() + CanonicalDataOffset + 1,
+                  NewChildren.begin() + NodeOffset);
+        NewNode->getAllChildren()[CanonicalDataOffset] = NewChild;
+        std::copy(OriginalChildren.begin() + CanonicalDataOffset + 1,
+                  OriginalChildren.end(),
+                  NewChildren.begin() + CanonicalDataOffset + 1);
+
+        return NewNode;
+      }
+
       Node *replaceDataNodeWithInner(NodePtr Original, NodePtr NewChild,
                                      count_t IndexBit, count_t DataOffset) {
         D(llvm::errs() << "replaceDataNodeWithInner(NodePtr Original, NodePtr "
                           "NewChild, count_t IndexBit, count_t DataOffset)\n");
+        assert(NewChild && "Nodes can't be null");
 
         InnerNode &DesugaredOriginal = Original->Impl.Inner;
         assert(!(DesugaredOriginal.NodeMap & IndexBit) &&
@@ -361,6 +425,65 @@ template <class ValueInfo> class HAMT {
         return NewNode;
       }
 
+      Node *removeInnerNode(NodePtr Original, count_t IndexBit,
+                            count_t Offset) {
+        InnerNode &DesugaredOriginal = Original->Impl.Inner;
+        assert(DesugaredOriginal.Size > 1 &&
+               "Removing children from nodes of size 1 doesn't make sense");
+        assert(DesugaredOriginal.NodeMap & IndexBit &&
+               "Index bit should not correspond to data node");
+        assert(!(DesugaredOriginal.DataMap & IndexBit) &&
+               "Should have an inner node for the given index bit");
+
+        const size_t NewSize = DesugaredOriginal.Size - 1;
+        Node *NewNode = allocate<InnerNode>(NewSize);
+
+        InnerNode &DesugaredNew = NewNode->Impl.Inner;
+        DesugaredNew.Size = NewSize;
+        DesugaredNew.NodeMap = DesugaredOriginal.NodeMap ^ IndexBit;
+        DesugaredNew.DataMap = DesugaredOriginal.DataMap;
+
+        ArrayRef<NodePtr> OriginalChildren = Original->getAllChildren();
+        MutableArrayRef<NodePtr> NewChildren = NewNode->getAllChildren();
+
+        std::copy_n(OriginalChildren.begin(), Offset, NewChildren.begin());
+        std::copy(OriginalChildren.begin() + Offset + 1, OriginalChildren.end(),
+                  NewChildren.begin() + Offset);
+
+        return NewNode;
+      }
+
+      Node *removeDataChild(NodePtr Original, count_t IndexBit,
+                            count_t Offset) {
+        InnerNode &DesugaredOriginal = Original->Impl.Inner;
+        assert(DesugaredOriginal.Size > 1 &&
+               "Removing children from nodes of size 1 doesn't make sense");
+        assert(!(DesugaredOriginal.NodeMap & IndexBit) &&
+               "Index bit should not correspond to inner node");
+        assert(DesugaredOriginal.DataMap & IndexBit &&
+               "Should have a data node for the given index bit");
+
+        const size_t NewSize = DesugaredOriginal.Size - 1;
+        Node *NewNode = allocate<InnerNode>(NewSize);
+
+        InnerNode &DesugaredNew = NewNode->Impl.Inner;
+        DesugaredNew.Size = NewSize;
+        DesugaredNew.NodeMap = DesugaredOriginal.NodeMap;
+        DesugaredNew.DataMap = DesugaredOriginal.DataMap ^ IndexBit;
+        count_t CanonicalOffset = Original->getCanonicalDataOffset(Offset);
+
+        ArrayRef<NodePtr> OriginalChildren = Original->getAllChildren();
+        MutableArrayRef<NodePtr> NewChildren = NewNode->getAllChildren();
+
+        std::copy_n(OriginalChildren.begin(), CanonicalOffset,
+                    NewChildren.begin());
+        std::copy(OriginalChildren.begin() + CanonicalOffset + 1,
+                  OriginalChildren.end(),
+                  NewChildren.begin() + CanonicalOffset);
+
+        return NewNode;
+      }
+
       template <class NodeType> Node *allocate(size_t Size) {
         // TODO: calculate correct size
         void *Buffer = Arena.Allocate(
@@ -380,7 +503,7 @@ template <class ValueInfo> class HAMT {
     BitmapType getDataMap() const { return Impl.Inner.DataMap; }
     MutableArrayRef<NodePtr> getAllChildren() {
       return {Impl.Inner.template getTrailingObjects<NodePtr>(),
-              Impl.Inner.Size};
+              getNumberOfChildren()};
     }
 
     MutableArrayRef<NodePtr> getInnerChildren() {
@@ -398,8 +521,10 @@ template <class ValueInfo> class HAMT {
     }
 
     count_t getCanonicalDataOffset(count_t Offset) const {
-      return Impl.Inner.Size - 1 - Offset;
+      return getNumberOfChildren() - 1 - Offset;
     }
+
+    size_t getNumberOfChildren() const { return Impl.Inner.Size; }
 
     MutableArrayRef<value_type> getCollisions() {
       return {Impl.Data.template getTrailingObjects<value_type>(),
@@ -412,6 +537,8 @@ template <class ValueInfo> class HAMT {
   NodePtr Root;
   size_t Size;
 
+  enum class RemoveKind { None, Modified, Trivial, Removed };
+
 public:
   class Factory {
   public:
@@ -422,8 +549,28 @@ public:
       size_t NewSize = Trie.getSize() + static_cast<size_t>(Result.second);
       return {Result.first, NewSize};
     }
-    LLVM_NODISCARD HAMT remove(const_value_type_ref Element) {
-      return getEmptySet();
+    LLVM_NODISCARD HAMT remove(HAMT Trie, const_value_type_ref Element) {
+      if (Trie.isEmpty())
+        return Trie;
+
+      hash_t Hash = ValueInfo::getHash(Element);
+      auto Result = removeImpl(Trie.Root, Element, Hash);
+      assert(Result.second != RemoveKind::Trivial &&
+             "Simplification of trivial paths should be finished before "
+             "finalizing the result");
+      if (Result.second == RemoveKind::None)
+        return Trie;
+
+      size_t NewSize = Trie.getSize() - 1;
+
+      if (NewSize == 0) {
+        assert(Result.second == RemoveKind::Removed &&
+               "Removing the last element from the set should be marked as "
+               "removal");
+        return getEmptySet();
+      }
+
+      return {Result.first, NewSize};
     }
 
   private:
@@ -471,6 +618,107 @@ public:
                 true};
       }
       return {NodeFactory.addDataChild(Node, IndexBit, Element), true};
+    }
+
+    LLVM_NODISCARD std::pair<NodePtr, RemoveKind>
+    removeImpl(NodePtr Node, const_value_type_ref Element, hash_t Hash,
+               shift_t Shift = 0) {
+      if (LLVM_UNLIKELY(Shift == getMaxShift(Bits))) {
+        ArrayRef<value_type> Collisions = Node->getCollisions();
+
+        for (count_t Index = 0; Index < Collisions.size(); ++Index)
+          if (ValueInfo::areEqual(Collisions[Index], Element)) {
+            RemoveKind Kind = RemoveKind::Modified;
+            switch (Collisions.size()) {
+            case 1:
+              // The whole node has been removed
+              return {nullptr, RemoveKind::Removed};
+            case 2:
+              // There are no collisions anymore, this node is now not
+              // restricted to be at the very bottom.
+              Kind = RemoveKind::Trivial;
+              LLVM_FALLTHROUGH;
+            default:
+              return {NodeFactory.removeCollision(Node, Index), Kind};
+            }
+          }
+
+        // Remove nothing.
+        return {nullptr, RemoveKind::None};
+      }
+
+      hash_t ShiftedMask = getMask(Bits) << Shift;
+      count_t Index = (Hash & ShiftedMask) >> Shift;
+      count_t IndexBit = BitmapType{1u} << Index;
+
+      if (Node->getNodeMap() & IndexBit) {
+        count_t Offset = countPopulation(Node->getNodeMap() & (IndexBit - 1));
+        auto Result = removeImpl(Node->getInnerChild(Offset), Element, Hash,
+                                 Shift + Bits);
+        switch (Result.second) {
+        case RemoveKind::None:
+          // Return the same result, we shouldn't change anything.
+          break;
+        case RemoveKind::Modified:
+          Result.first =
+              NodeFactory.replaceInnerNode(Node, Result.first, Offset);
+          break;
+        case RemoveKind::Trivial:
+          if (Node->getNumberOfChildren() != 1 || Shift == 0) {
+            // Line of trivial nodes collapsing is over.
+            Result.first = NodeFactory.replaceInnerNodeWithData(
+                Node, Result.first, IndexBit, Offset);
+            Result.second = RemoveKind::Modified;
+          } // else remove the same the result because we can
+            // easily remove this node.
+          break;
+        case RemoveKind::Removed:
+          if (Node->getNumberOfChildren() == 1) {
+            // We need to remove this node as well.
+            break;
+          }
+          if (Node->getNumberOfChildren() == 2) {
+            if (Node->getDataMap() != 0 && Shift != 0) {
+              // We remove the only inner child, while leaving one data child.
+              // This is a trivial situation.
+              Result.first = Node->getDataChild(0);
+              Result.second = RemoveKind::Trivial;
+              break;
+            }
+          }
+
+          Result.first = NodeFactory.removeInnerNode(Node, IndexBit, Offset);
+          Result.second = RemoveKind::Modified;
+          break;
+        }
+
+        return Result;
+      }
+
+      if (Node->getDataMap() & IndexBit) {
+        count_t Offset = countPopulation(Node->getDataMap() & (IndexBit - 1));
+        const_value_type_ref StoredValue = Node->getData(Offset);
+        if (ValueInfo::areEqual(StoredValue, Element)) {
+          switch (Node->getNumberOfChildren()) {
+          case 1:
+            // That is the only child, so we can remove both this child
+            // and the inner node containing it.
+            return {nullptr, RemoveKind::Removed};
+          case 2:
+            if (Node->getNodeMap() == 0 && Shift != 0) {
+              assert(Offset == 0 || Offset == 1);
+              count_t OtherOffset = !Offset;
+              return {Node->getDataChild(OtherOffset), RemoveKind::Trivial};
+            }
+            LLVM_FALLTHROUGH;
+          default:
+            return {NodeFactory.removeDataChild(Node, IndexBit, Offset),
+                    RemoveKind::Modified};
+          }
+        }
+      }
+
+      return {nullptr, RemoveKind::None};
     }
 
     typename Node::Factory NodeFactory;
@@ -598,6 +846,9 @@ public:
   };
 
   LLVM_NODISCARD const_value_type *find(key_type_ref Key) const {
+    if (Root == nullptr)
+      return nullptr;
+
     NodePtr Node = Root;
     hash_t Hash = ValueInfo::getHash(Key);
 
@@ -732,6 +983,10 @@ public:
                                         const_value_type_ref Value) {
       return Impl.add(Original.Impl, Value);
     }
+    LLVM_NODISCARD ImmutableHashSet remove(ImmutableHashSet Original,
+                                           const_value_type_ref Value) {
+      return Impl.remove(Original.Impl, Value);
+    }
 
   private:
     typename Trie::Factory Impl;
@@ -743,6 +998,7 @@ public:
 
   bool contains(const_value_type_ref Value) const { return Impl.find(Value); }
   size_t getSize() const { return Impl.getSize(); }
+  bool isEmpty() const { return Impl.isEmpty(); }
 
   bool operator==(const ImmutableHashSet &RHS) const {
     return Impl.isEqual(RHS.Impl);
