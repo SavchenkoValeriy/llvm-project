@@ -15,6 +15,7 @@
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/Hashing.h"
+#include "llvm/ADT/ImmutableSet.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Allocator.h"
@@ -118,8 +119,12 @@ template <class ValueInfo> class HAMT {
 
         DataNode &DesugaredNew = NewNode->Impl.Data;
         DesugaredNew.Size = NewSize;
-        llvm::copy(Original->getCollisions(), NewNode->getCollisions().begin());
-        NewNode->getCollisions()[NewSize - 1] = NewElement;
+
+        ArrayRef<value_type> OriginalCollisions = Original->getCollisions();
+        std::uninitialized_copy(OriginalCollisions.begin(),
+                                OriginalCollisions.end(),
+                                NewNode->getCollisions().begin());
+        new (&NewNode->getCollisions()[NewSize - 1]) value_type(NewElement);
 
         D(llvm::errs() << "New size: " << NewSize << "\n");
 
@@ -135,8 +140,12 @@ template <class ValueInfo> class HAMT {
 
         DataNode &DesugaredNew = NewNode->Impl.Data;
         DesugaredNew.Size = DesugaredOriginal.Size;
-        llvm::copy(Original->getCollisions(), NewNode->getCollisions().begin());
-        NewNode->getCollisions()[Index] = NewElement;
+
+        ArrayRef<value_type> OriginalCollisions = Original->getCollisions();
+        std::uninitialized_copy(OriginalCollisions.begin(),
+                                OriginalCollisions.end(),
+                                NewNode->getCollisions().begin());
+        new (&NewNode->getCollisions()[Index]) value_type(NewElement);
 
         return NewNode;
       }
@@ -155,10 +164,12 @@ template <class ValueInfo> class HAMT {
         ArrayRef<value_type> OriginalCollisions = Original->getCollisions();
         MutableArrayRef<value_type> NewCollisions = NewNode->getCollisions();
 
-        std::copy_n(OriginalCollisions.begin(), Offset, NewCollisions.begin());
+        std::uninitialized_copy_n(OriginalCollisions.begin(), Offset,
+                                  NewCollisions.begin());
         // Skip OriginalCollisions[Offset]
-        std::copy(OriginalCollisions.begin() + Offset + 1,
-                  OriginalCollisions.end(), NewCollisions.begin() + Offset);
+        std::uninitialized_copy(OriginalCollisions.begin() + Offset + 1,
+                                OriginalCollisions.end(),
+                                NewCollisions.begin() + Offset);
 
         return NewNode;
       }
@@ -238,7 +249,7 @@ template <class ValueInfo> class HAMT {
 
         DataNode &DesugaredNew = NewNode->Impl.Data;
         DesugaredNew.Size = NewSize;
-        NewNode->getCollisions()[0] = Data;
+        new (&NewNode->getCollisions()[0]) value_type(Data);
 
         return NewNode;
       }
@@ -251,8 +262,8 @@ template <class ValueInfo> class HAMT {
 
         DataNode &DesugaredNew = NewNode->Impl.Data;
         DesugaredNew.Size = NewSize;
-        NewNode->getCollisions()[0] = First;
-        NewNode->getCollisions()[1] = Second;
+        new (&NewNode->getCollisions()[0]) value_type(First);
+        new (&NewNode->getCollisions()[1]) value_type(Second);
 
         return NewNode;
       }
@@ -549,7 +560,7 @@ public:
       size_t NewSize = Trie.getSize() + static_cast<size_t>(Result.second);
       return {Result.first, NewSize};
     }
-    LLVM_NODISCARD HAMT remove(HAMT Trie, const_value_type_ref Element) {
+    LLVM_NODISCARD HAMT remove(HAMT Trie, key_type_ref Element) {
       if (Trie.isEmpty())
         return Trie;
 
@@ -621,7 +632,7 @@ public:
     }
 
     LLVM_NODISCARD std::pair<NodePtr, RemoveKind>
-    removeImpl(NodePtr Node, const_value_type_ref Element, hash_t Hash,
+    removeImpl(NodePtr Node, key_type_ref Element, hash_t Hash,
                shift_t Shift = 0) {
       if (LLVM_UNLIKELY(Shift == getMaxShift(Bits))) {
         ArrayRef<value_type> Collisions = Node->getCollisions();
@@ -729,6 +740,8 @@ public:
     using value_type = const_value_type;
     using pointer = value_type *;
     using reference = value_type &;
+    using difference_type = count_t;
+    using iterator_category = std::forward_iterator_tag;
 
     struct EndTag {};
     Iterator(const HAMT &Trie) : Iterator(Trie.Root) {}
@@ -884,6 +897,20 @@ public:
     return nullptr;
   }
 
+  using RootType = NodePtr;
+  HAMT(RootType Root) : Root(Root) {
+    Size = 0;
+    if (Root != nullptr) {
+      for (auto It = Iterator(*this),
+                End = Iterator(*this, typename Iterator::EndTag{});
+           It != End; ++It) {
+        ++Size;
+      }
+    }
+  }
+
+  NodePtr getRoot() const { return Root; }
+
   size_t getSize() const { return Size; }
 
   bool isEmpty() const { return getSize() == 0; }
@@ -953,9 +980,12 @@ template <class T> struct ImmutableHasSetInfo {
   using const_value_type_ref = const T &;
   using key_type = const T;
   using key_type_ref = const T &;
+  using ProfileInfo = ImutProfileInfo<T>;
 
   static detail::hash_t getHash(key_type_ref Key) {
-    return llvm::hash_value(Key);
+    FoldingSetNodeID ID;
+    ProfileInfo::Profile(ID, Key);
+    return ID.ComputeHash();
   }
   static bool areEqual(const_value_type_ref LHS, const_value_type_ref RHS) {
     return LHS == RHS;
@@ -999,6 +1029,11 @@ public:
   bool contains(const_value_type_ref Value) const { return Impl.find(Value); }
   size_t getSize() const { return Impl.getSize(); }
   bool isEmpty() const { return Impl.isEmpty(); }
+
+  using RootType = typename Trie::RootType;
+  RootType getRoot() const { return Impl.getRoot(); }
+
+  ImmutableHashSet(RootType Root) : Impl(Root) {}
 
   bool operator==(const ImmutableHashSet &RHS) const {
     return Impl.isEqual(RHS.Impl);
