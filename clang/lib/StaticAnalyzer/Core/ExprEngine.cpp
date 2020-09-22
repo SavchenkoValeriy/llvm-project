@@ -188,7 +188,7 @@ public:
 };
 } // namespace
 
-typedef llvm::ImmutableMap<ConstructedObjectKey, SVal>
+typedef llvm::ImmutableHashMap<ConstructedObjectKey, SVal>
     ObjectsUnderConstructionMap;
 REGISTER_TRAIT_WITH_PROGRAMSTATE(ObjectsUnderConstruction,
                                  ObjectsUnderConstructionMap)
@@ -2289,14 +2289,11 @@ void ExprEngine::processBranch(const Stmt *Condition,
 /// The GDM component containing the set of global variables which have been
 /// previously initialized with explicit initializers.
 REGISTER_TRAIT_WITH_PROGRAMSTATE(InitializedGlobalsSet,
-                                 llvm::ImmutableSet<const VarDecl *>)
+                                 llvm::ImmutableHashSet<const VarDecl *>)
 
-void ExprEngine::processStaticInitializer(const DeclStmt *DS,
-                                          NodeBuilderContext &BuilderCtx,
-                                          ExplodedNode *Pred,
-                                          ExplodedNodeSet &Dst,
-                                          const CFGBlock *DstT,
-                                          const CFGBlock *DstF) {
+void ExprEngine::processStaticInitializer(
+    const DeclStmt *DS, NodeBuilderContext &BuilderCtx, ExplodedNode *Pred,
+    ExplodedNodeSet &Dst, const CFGBlock *DstT, const CFGBlock *DstF) {
   PrettyStackTraceLocationContext CrashInfo(Pred->getLocationContext());
   currBldrCtx = &BuilderCtx;
 

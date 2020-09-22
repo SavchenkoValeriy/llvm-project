@@ -13,11 +13,12 @@
 #ifndef LLVM_ADT_IMMUTABLEHASHMAP_H
 #define LLVM_ADT_IMMUTABLEHASHMAP_H
 
+#include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/ImmutableHashSet.h"
 
 namespace llvm {
 
-template <class KeyTy, class DataTy> struct ImmutableHasMapInfo {
+template <class KeyTy, class DataTy> struct ImmutableHashMapInfo {
   using value_type = std::pair<KeyTy, DataTy>;
   using const_value_type = const value_type;
   using value_type_ref = value_type &;
@@ -26,14 +27,20 @@ template <class KeyTy, class DataTy> struct ImmutableHasMapInfo {
   using key_type_ref = const KeyTy &;
   using data_type = const DataTy;
   using data_type_ref = const DataTy &;
-  using ProfileInfo = ImutProfileInfo<KeyTy>;
+  using ValueProfileInfo = ImutProfileInfo<DataTy>;
+  using KeyProfileInfo = ImutProfileInfo<KeyTy>;
+
+  static void Profile(FoldingSetNodeID &ID, const_value_type_ref Data) {
+    KeyProfileInfo::Profile(ID, Data.first);
+    ValueProfileInfo::Profile(ID, Data.second);
+  }
 
   static detail::hash_t getHash(const_value_type_ref Value) {
     return getHash(getKey(Value));
   }
   static detail::hash_t getHash(key_type_ref Key) {
     FoldingSetNodeID ID;
-    ProfileInfo::Profile(ID, Key);
+    KeyProfileInfo::Profile(ID, Key);
     return ID.ComputeHash();
   }
   static bool areEqual(const_value_type_ref LHS, const_value_type_ref RHS) {
@@ -57,7 +64,7 @@ template <class KeyTy, class DataTy> struct ImmutableHasMapInfo {
 };
 
 template <class KeyTy, class DataTy,
-          class ValueInfo = ImmutableHasMapInfo<KeyTy, DataTy>>
+          class ValueInfo = ImmutableHashMapInfo<KeyTy, DataTy>>
 class ImmutableHashMap {
 public:
   using value_type = typename ValueInfo::value_type;
@@ -74,6 +81,9 @@ public:
 
   class Factory {
   public:
+    Factory() = default;
+    Factory(BumpPtrAllocator &Alloc) : Impl(Alloc) {}
+
     LLVM_NODISCARD ImmutableHashMap getEmptyMap() { return Impl.getEmptySet(); }
     LLVM_NODISCARD ImmutableHashMap add(ImmutableHashMap Original,
                                         key_type_ref K, data_type_ref D) {
@@ -88,7 +98,14 @@ public:
     typename Trie::Factory Impl;
   };
 
-  using iterator = typename Trie::Iterator;
+  class iterator : public Trie::Iterator {
+  public:
+    using Trie::Iterator::Iterator;
+
+    key_type_ref getKey() const { return (*this)->first; }
+    data_type_ref getData() const { return (*this)->second; }
+  };
+
   iterator begin() const { return iterator(Impl); }
   iterator end() const { return iterator(Impl, typename iterator::EndTag{}); }
 
@@ -113,6 +130,12 @@ public:
   bool operator!=(const ImmutableHashMap &RHS) const {
     return !operator==(RHS);
   }
+
+  static void Profile(FoldingSetNodeID &ID, const ImmutableHashMap &S) {
+    ID.AddPointer(S.getRoot());
+  }
+
+  void Profile(FoldingSetNodeID &ID) const { return Profile(ID, *this); }
 
 private:
   Trie Impl;

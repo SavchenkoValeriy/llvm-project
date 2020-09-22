@@ -1833,7 +1833,7 @@ inline ProgramStateRef EquivalenceClass::merge(RangeSet::Factory &F,
   // We estimate the size of the class by the height of tree containing
   // its members.  Merging is not a trivial operation, so it's easier to
   // merge the smaller class into the bigger one.
-  if (Members.getHeight() >= OtherMembers.getHeight()) {
+  if (Members.getSize() >= OtherMembers.getSize()) {
     return mergeImpl(F, State, Members, Other, OtherMembers);
   } else {
     return Other.mergeImpl(F, State, OtherMembers, *this, Members);
@@ -2263,7 +2263,6 @@ RangeConstraintManager::removeDeadBindings(ProgramStateRef State,
   SymbolSet::Factory &SetFactory = State->get_context<SymbolSet>();
 
   ConstraintRangeTy Constraints = State->get<ConstraintRange>();
-  ConstraintRangeTy NewConstraints = Constraints;
   ConstraintRangeTy::Factory &ConstraintFactory =
       State->get_context<ConstraintRange>();
 

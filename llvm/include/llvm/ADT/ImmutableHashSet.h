@@ -29,7 +29,7 @@
 #include <cstdint>
 #include <type_traits>
 
-#define D(X)
+#define DEBUG(X)
 
 namespace llvm {
 
@@ -81,10 +81,14 @@ template <class ValueInfo> class HAMT {
       BitmapType NodeMap;
       BitmapType DataMap;
       size_t Size;
+
+      using TrailingType = NodePtr;
     };
 
     struct DataNode final : public TrailingObjects<DataNode, value_type> {
       size_t Size;
+
+      using TrailingType = value_type;
     };
 
     union ImplType {
@@ -92,27 +96,15 @@ template <class ValueInfo> class HAMT {
       DataNode Data;
     };
 
-    template <class NodeType> struct NodeTraitImpl;
-
-    template <> struct NodeTraitImpl<InnerNode> {
-      using TrailingType = NodePtr;
-    };
-
-    template <> struct NodeTraitImpl<DataNode> {
-      using TrailingType = value_type;
-    };
-
-    template <class NodeType>
-    using NodeTrait = typename NodeTraitImpl<NodeType>::TrailingType;
-
     ImplType Impl;
 
   public:
     class Factory {
     public:
       Node *addCollision(NodePtr Original, const_value_type_ref NewElement) {
-        D(llvm::errs() << "addCollision(NodePtr Original, const_value_type_ref "
-                          "NewElement)\n");
+        DEBUG(llvm::errs()
+              << "addCollision(NodePtr Original, const_value_type_ref "
+                 "NewElement)\n");
         DataNode &DesugaredOriginal = Original->Impl.Data;
         const size_t NewSize = DesugaredOriginal.Size + 1;
         Node *NewNode = allocate<DataNode>(NewSize);
@@ -126,15 +118,16 @@ template <class ValueInfo> class HAMT {
                                 NewNode->getCollisions().begin());
         new (&NewNode->getCollisions()[NewSize - 1]) value_type(NewElement);
 
-        D(llvm::errs() << "New size: " << NewSize << "\n");
+        DEBUG(llvm::errs() << "New size: " << NewSize << "\n");
 
         return NewNode;
       }
 
       Node *replaceCollision(NodePtr Original, const_value_type_ref NewElement,
                              count_t Index) {
-        D(llvm::errs() << "replaceCollision(NodePtr Original, "
-                          "const_value_type_ref NewElement, count_t Index)\n");
+        DEBUG(llvm::errs()
+              << "replaceCollision(NodePtr Original, "
+                 "const_value_type_ref NewElement, count_t Index)\n");
         DataNode &DesugaredOriginal = Original->Impl.Data;
         Node *NewNode = allocate<DataNode>(DesugaredOriginal.Size);
 
@@ -177,9 +170,9 @@ template <class ValueInfo> class HAMT {
       Node *replaceInnerNode(NodePtr Original, NodePtr NewChild,
                              count_t Offset) {
         assert(NewChild && "Nodes can't be null");
-        D(llvm::errs()
-          << "replaceInnerNode(NodePtr Original, NodePtr NewChild, "
-             "count_t Offset)\n");
+        DEBUG(llvm::errs()
+              << "replaceInnerNode(NodePtr Original, NodePtr NewChild, "
+                 "count_t Offset)\n");
         InnerNode &DesugaredOriginal = Original->Impl.Inner;
         Node *NewNode = allocate<InnerNode>(DesugaredOriginal.Size);
 
@@ -196,8 +189,9 @@ template <class ValueInfo> class HAMT {
 
       Node *replaceDataNode(NodePtr Original, const_value_type_ref Element,
                             count_t Offset) {
-        D(llvm::errs() << "replaceDataNode(NodePtr Original, "
-                          "const_value_type_ref Element, count_t Offset)\n");
+        DEBUG(
+            llvm::errs() << "replaceDataNode(NodePtr Original, "
+                            "const_value_type_ref Element, count_t Offset)\n");
         Node *NewChild = createDataNode(Element);
         InnerNode &DesugaredOriginal = Original->Impl.Inner;
         Node *NewNode = allocate<InnerNode>(DesugaredOriginal.Size);
@@ -216,18 +210,19 @@ template <class ValueInfo> class HAMT {
       Node *mergeValues(shift_t Shift, const_value_type_ref First,
                         hash_t FirstHash, const_value_type_ref Second,
                         hash_t SecondHash) {
-        D(llvm::errs()
-          << "mergeValues(shift_t Shift, const_value_type_ref First, hash_t "
-             "FirstHash, const_value_type_ref Second, hash_t SecondHash)\n");
-        D(errs() << "Merging " << First << " and " << Second << "\n");
+        DEBUG(
+            llvm::errs()
+            << "mergeValues(shift_t Shift, const_value_type_ref First, hash_t "
+               "FirstHash, const_value_type_ref Second, hash_t SecondHash)\n");
+        DEBUG(errs() << "Merging " << First << " and " << Second << "\n");
         if (LLVM_LIKELY(Shift < getMaxShift(Bits))) {
           hash_t ShiftedMask = getMask(Bits) << Shift;
-          D(errs() << "Population " << countPopulation(ShiftedMask)
-                   << ", shift " << Shift << "\n");
+          DEBUG(errs() << "Population " << countPopulation(ShiftedMask)
+                       << ", shift " << Shift << "\n");
           hash_t FirstIndex = FirstHash & ShiftedMask;
           hash_t SecondIndex = SecondHash & ShiftedMask;
-          D(errs() << "First " << (FirstIndex >> Shift) << ", Second "
-                   << (SecondIndex >> Shift) << "\n");
+          DEBUG(errs() << "First " << (FirstIndex >> Shift) << ", Second "
+                       << (SecondIndex >> Shift) << "\n");
 
           if (LLVM_UNLIKELY(FirstIndex == SecondIndex)) {
             Node *Merged =
@@ -243,7 +238,7 @@ template <class ValueInfo> class HAMT {
       }
 
       Node *createDataNode(const_value_type_ref Data) {
-        D(llvm::errs() << "createDataNode(const_value_type_ref Data)\n");
+        DEBUG(llvm::errs() << "createDataNode(const_value_type_ref Data)\n");
         constexpr size_t NewSize = 1;
         Node *NewNode = allocate<DataNode>(NewSize);
 
@@ -255,8 +250,8 @@ template <class ValueInfo> class HAMT {
       }
       Node *createDataNode(const_value_type_ref First,
                            const_value_type_ref Second) {
-        D(llvm::errs() << "createDataNode(const_value_type_ref First, "
-                          "const_value_type_ref Second)\n");
+        DEBUG(llvm::errs() << "createDataNode(const_value_type_ref First, "
+                              "const_value_type_ref Second)\n");
         constexpr size_t NewSize = 2;
         Node *NewNode = allocate<DataNode>(NewSize);
 
@@ -268,8 +263,8 @@ template <class ValueInfo> class HAMT {
         return NewNode;
       }
       Node *createInnerNode(count_t Index, const_value_type_ref Element) {
-        D(llvm::errs()
-          << "createInnerNode(count_t Index, const_value_type_ref Element)\n");
+        DEBUG(llvm::errs() << "createInnerNode(count_t Index, "
+                              "const_value_type_ref Element)\n");
         constexpr size_t NewSize = 1;
         Node *NewNode = allocate<InnerNode>(NewSize);
         Node *Child = createDataNode(Element);
@@ -283,7 +278,8 @@ template <class ValueInfo> class HAMT {
         return NewNode;
       }
       Node *createInnerNode(count_t Index, NodePtr Child) {
-        D(llvm::errs() << "createInnerNode(count_t Index, NodePtr Child)\n");
+        DEBUG(
+            llvm::errs() << "createInnerNode(count_t Index, NodePtr Child)\n");
         constexpr size_t NewSize = 1;
         Node *NewNode = allocate<InnerNode>(NewSize);
 
@@ -297,10 +293,11 @@ template <class ValueInfo> class HAMT {
       }
       Node *createInnerNode(count_t FirstIndex, const_value_type_ref First,
                             count_t SecondIndex, const_value_type_ref Second) {
-        D(llvm::errs()
-          << "createInnerNode(count_t FirstIndex, const_value_type_ref "
-             "First, count_t SecondIndex, const_value_type_ref Second)\n");
-        D(errs() << "Indices: " << FirstIndex << ", " << SecondIndex << "\n");
+        DEBUG(llvm::errs()
+              << "createInnerNode(count_t FirstIndex, const_value_type_ref "
+                 "First, count_t SecondIndex, const_value_type_ref Second)\n");
+        DEBUG(errs() << "Indices: " << FirstIndex << ", " << SecondIndex
+                     << "\n");
         assert(FirstIndex != SecondIndex);
         constexpr size_t NewSize = 2;
         Node *NewNode = allocate<InnerNode>(NewSize);
@@ -365,8 +362,9 @@ template <class ValueInfo> class HAMT {
 
       Node *replaceDataNodeWithInner(NodePtr Original, NodePtr NewChild,
                                      count_t IndexBit, count_t DataOffset) {
-        D(llvm::errs() << "replaceDataNodeWithInner(NodePtr Original, NodePtr "
-                          "NewChild, count_t IndexBit, count_t DataOffset)\n");
+        DEBUG(llvm::errs()
+              << "replaceDataNodeWithInner(NodePtr Original, NodePtr "
+                 "NewChild, count_t IndexBit, count_t DataOffset)\n");
         assert(NewChild && "Nodes can't be null");
 
         InnerNode &DesugaredOriginal = Original->Impl.Inner;
@@ -407,8 +405,9 @@ template <class ValueInfo> class HAMT {
 
       Node *addDataChild(NodePtr Original, count_t IndexBit,
                          const_value_type_ref Element) {
-        D(llvm::errs() << "addDataChild(NodePtr Original, count_t IndexBit, "
-                          "const_value_type_ref Element)\n");
+        DEBUG(
+            llvm::errs() << "addDataChild(NodePtr Original, count_t IndexBit, "
+                            "const_value_type_ref Element)\n");
 
         InnerNode &DesugaredOriginal = Original->Impl.Inner;
         const size_t NewSize = DesugaredOriginal.Size + 1;
@@ -495,17 +494,35 @@ template <class ValueInfo> class HAMT {
         return NewNode;
       }
 
+      Factory()
+          : Allocator(reinterpret_cast<uintptr_t>(new BumpPtrAllocator())) {}
+
+      Factory(BumpPtrAllocator &Alloc)
+          : Allocator(reinterpret_cast<uintptr_t>(&Alloc) | 0x1) {}
+
+      ~Factory() {
+        if (ownsAllocator())
+          delete &getAllocator();
+      }
+
+    private:
       template <class NodeType> Node *allocate(size_t Size) {
-        // TODO: calculate correct size
-        void *Buffer = Arena.Allocate(
-            sizeof(Node) +
-                NodeType::template additionalSizeToAlloc<NodeTrait<NodeType>>(
-                    Size),
+        void *Buffer = getAllocator().Allocate(
+            sizeof(Node) + NodeType::template additionalSizeToAlloc<
+                               typename NodeType::TrailingType>(Size),
             alignof(Node));
         Node *Result = new (Buffer) Node();
         new (&Result->Impl) NodeType();
         return Result;
       }
+
+      bool ownsAllocator() const { return (Allocator & 0x1) == 0; }
+
+      BumpPtrAllocator &getAllocator() const {
+        return *reinterpret_cast<BumpPtrAllocator *>(Allocator & ~0x1);
+      }
+
+      uintptr_t Allocator;
 
       BumpPtrAllocator Arena;
     };
@@ -543,22 +560,18 @@ template <class ValueInfo> class HAMT {
     }
   };
 
-  HAMT(NodePtr Root, size_t Size) : Root(Root), Size(Size) {}
-
   NodePtr Root;
-  size_t Size;
 
   enum class RemoveKind { None, Modified, Trivial, Removed };
 
 public:
   class Factory {
   public:
-    LLVM_NODISCARD HAMT getEmptySet() { return {nullptr, 0}; }
+    LLVM_NODISCARD HAMT getEmptySet() { return {nullptr}; }
     LLVM_NODISCARD HAMT add(HAMT Trie, const_value_type_ref Element) {
       hash_t Hash = ValueInfo::getHash(Element);
       auto Result = addImpl(Trie.Root, Element, Hash);
-      size_t NewSize = Trie.getSize() + static_cast<size_t>(Result.second);
-      return {Result.first, NewSize};
+      return {Result.first};
     }
     LLVM_NODISCARD HAMT remove(HAMT Trie, key_type_ref Element) {
       if (Trie.isEmpty())
@@ -572,17 +585,11 @@ public:
       if (Result.second == RemoveKind::None)
         return Trie;
 
-      size_t NewSize = Trie.getSize() - 1;
-
-      if (NewSize == 0) {
-        assert(Result.second == RemoveKind::Removed &&
-               "Removing the last element from the set should be marked as "
-               "removal");
-        return getEmptySet();
-      }
-
-      return {Result.first, NewSize};
+      return {Result.first};
     }
+
+    Factory() = default;
+    Factory(BumpPtrAllocator &Alloc) : NodeFactory(Alloc) {}
 
   private:
     LLVM_NODISCARD std::pair<NodePtr, bool>
@@ -759,7 +766,7 @@ public:
       return Copy;
     }
 
-    reference operator*() {
+    reference operator*() const {
       assert(Index > 0);
       assert(Depth > 0);
       count_t RealIndex = Index - 1;
@@ -769,7 +776,7 @@ public:
 
       return getCurrentNode()->getAllChildren()[RealIndex]->getCollisions()[0];
     }
-    pointer operator->() { return &operator*(); }
+    pointer operator->() const { return &operator*(); }
 
     bool operator==(const Iterator &RHS) const {
       return Depth == RHS.Depth &&
@@ -865,8 +872,8 @@ public:
     NodePtr Node = Root;
     hash_t Hash = ValueInfo::getHash(Key);
 
-    D(errs() << "Max depth: " << getMaxDepth(Bits) << ", "
-             << "max shift: " << getMaxShift(Bits) << "\n");
+    DEBUG(errs() << "Max depth: " << getMaxDepth(Bits) << ", "
+                 << "max shift: " << getMaxShift(Bits) << "\n");
     for (count_t i = 0; i < getMaxDepth(Bits); ++i) {
       count_t Index = Hash & getMask(Bits);
       count_t IndexBit = BitmapType{1u} << Index;
@@ -883,7 +890,7 @@ public:
         const_value_type_ref StoredValue = Node->getData(Offset);
 
         // When we didn't reach the maximal depth, collisions are not possible.
-        D(errs() << StoredValue << " vs. " << Key << "\n");
+        DEBUG(errs() << StoredValue << " vs. " << Key << "\n");
         if (ValueInfo::areEqual(StoredValue, Key))
           return &StoredValue;
       }
@@ -898,8 +905,12 @@ public:
   }
 
   using RootType = NodePtr;
-  HAMT(RootType Root) : Root(Root) {
-    Size = 0;
+  HAMT(RootType Root) : Root(Root) {}
+
+  NodePtr getRoot() const { return Root; }
+
+  size_t getSize() const {
+    size_t Size = 0;
     if (Root != nullptr) {
       for (auto It = Iterator(*this),
                 End = Iterator(*this, typename Iterator::EndTag{});
@@ -907,11 +918,8 @@ public:
         ++Size;
       }
     }
+    return Size;
   }
-
-  NodePtr getRoot() const { return Root; }
-
-  size_t getSize() const { return Size; }
 
   bool isEmpty() const { return getSize() == 0; }
 
@@ -942,10 +950,10 @@ private:
     if (LHSInnerNodes.size() != RHSInnerNodes.size())
       return false;
 
-    for (std::pair<NodePtr, NodePtr> NodesToCompare :
+    for (std::tuple<NodePtr, NodePtr> NodesToCompare :
          zip(LHSInnerNodes, RHSInnerNodes)) {
-      if (!areTreesEqual(NodesToCompare.first, NodesToCompare.second,
-                         Depth + 1))
+      if (!areTreesEqual(std::get<0>(NodesToCompare),
+                         std::get<1>(NodesToCompare), Depth + 1))
         return false;
     }
 
@@ -973,7 +981,7 @@ private:
 
 } // end namespace detail
 
-template <class T> struct ImmutableHasSetInfo {
+template <class T> struct ImmutableHashSetInfo {
   using value_type = T;
   using const_value_type = const T;
   using value_type_ref = T &;
@@ -981,6 +989,10 @@ template <class T> struct ImmutableHasSetInfo {
   using key_type = const T;
   using key_type_ref = const T &;
   using ProfileInfo = ImutProfileInfo<T>;
+
+  static void Profile(FoldingSetNodeID ID, const_value_type_ref Value) {
+    ProfileInfo::Profile(ID, Value);
+  }
 
   static detail::hash_t getHash(key_type_ref Key) {
     FoldingSetNodeID ID;
@@ -992,7 +1004,7 @@ template <class T> struct ImmutableHasSetInfo {
   }
 };
 
-template <class T, class ValueInfo = ImmutableHasSetInfo<T>>
+template <class T, class ValueInfo = ImmutableHashSetInfo<T>>
 class ImmutableHashSet {
 public:
   using value_type = typename ValueInfo::value_type;
@@ -1008,6 +1020,9 @@ private:
 public:
   class Factory {
   public:
+    Factory() = default;
+    Factory(BumpPtrAllocator &Alloc) : Impl(Alloc) {}
+
     LLVM_NODISCARD ImmutableHashSet getEmptySet() { return Impl.getEmptySet(); }
     LLVM_NODISCARD ImmutableHashSet add(ImmutableHashSet Original,
                                         const_value_type_ref Value) {
@@ -1042,6 +1057,12 @@ public:
   bool operator!=(const ImmutableHashSet &RHS) const {
     return !operator==(RHS);
   }
+
+  static void Profile(FoldingSetNodeID &ID, const ImmutableHashSet &S) {
+    ID.AddPointer(S.getRoot());
+  }
+
+  void Profile(FoldingSetNodeID &ID) const { return Profile(ID, *this); }
 };
 
 } // end namespace llvm
