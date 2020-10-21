@@ -24,6 +24,7 @@
 #include "clang/AST/StmtObjC.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Analysis/Analyses/CFGReachabilityAnalysis.h"
+#include "clang/Analysis/Analyses/CalledOnceCheck.h"
 #include "clang/Analysis/Analyses/Consumed.h"
 #include "clang/Analysis/Analyses/ReachableCode.h"
 #include "clang/Analysis/Analyses/ThreadSafety.h"
@@ -1623,6 +1624,37 @@ private:
     });
   }
 };
+
+class CalledOnceCheckReporter : public CalledOnceCheckHandler {
+public:
+  CalledOnceCheckReporter(Sema &S) : S(S) {}
+  void handleDoubleCall(const ParmVarDecl *Parameter, const Expr *Call,
+                        const Expr *PrevCall) override {
+    S.Diag(Call->getBeginLoc(), diag::warn_called_once_gets_called_twice)
+        << Parameter;
+    S.Diag(PrevCall->getBeginLoc(), diag::note_called_once_gets_called_twice);
+  }
+
+  void handleNeverCalled(const ParmVarDecl *Parameter) override {
+    S.Diag(Parameter->getBeginLoc(), diag::warn_called_once_never_called)
+        << Parameter << /* Captured */ false;
+  }
+
+  void handleNeverCalled(const ParmVarDecl *Parameter, const Stmt *Where,
+                         NeverCalledReason Reason) override {
+    S.Diag(Where->getBeginLoc(), diag::warn_called_once_never_called_when)
+        << Parameter << (unsigned)Reason;
+  }
+
+  void handleCapturedNeverCalled(const ParmVarDecl *Parameter,
+                                 const Decl *Where) override {
+    S.Diag(Where->getBeginLoc(), diag::warn_called_once_never_called)
+        << Parameter << /* Captured */ true;
+  }
+
+private:
+  Sema &S;
+};
 } // anonymous namespace
 
 namespace clang {
@@ -2262,6 +2294,12 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
                      stats.NumBlockVisits);
       }
     }
+  }
+
+  // Check for violations of "called once" parameter properties.
+  if (CFG *FunctionCFG = AC.getCFG()) {
+    CalledOnceCheckReporter Reporter(S);
+    checkCalledOnceParameters(*FunctionCFG, AC, Reporter);
   }
 
   bool FallThroughDiagFull =

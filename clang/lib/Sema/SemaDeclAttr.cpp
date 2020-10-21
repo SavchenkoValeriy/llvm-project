@@ -3611,6 +3611,57 @@ static void handleCallbackAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
       S.Context, AL, EncodingIndices.data(), EncodingIndices.size()));
 }
 
+static bool hasCallOperator(const CXXRecordDecl &RD) {
+  DeclarationName Name =
+      RD.getASTContext().DeclarationNames.getCXXOperatorName(OO_Call);
+  DeclContext::lookup_result Calls = RD.lookup(Name);
+  // NOTE: Potentially, we can search for call operators in base classes
+  //       as well.  However, right now it seems too small of a case
+  //       to care.
+  return !Calls.empty();
+}
+
+static bool isFunctionLike(const Type &T) {
+  // Check for explicit function types
+  if (T.isFunctionPointerType() || T.isFunctionReferenceType() ||
+      T.isMemberFunctionPointerType() || T.isBlockPointerType()) {
+    return true;
+  }
+
+  // Check for function objects
+  const CXXRecordDecl *PotentialFunctor = T.getAsCXXRecordDecl();
+  if (!PotentialFunctor) {
+    PotentialFunctor = T.getPointeeCXXRecordDecl();
+    if (!PotentialFunctor) {
+      return false;
+    }
+  }
+
+  if (!PotentialFunctor->hasDefinition()) {
+    // Consider that incomplete types can still be functors
+    return true;
+  }
+
+  PotentialFunctor = PotentialFunctor->getDefinition();
+  return hasCallOperator(*PotentialFunctor);
+}
+
+/// Handle 'called_once' attribute.
+static void handleCalledOnceAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (D->isInvalidDecl())
+    return;
+
+  // 'called_once' only applies to parameters representing functions.
+  QualType T = cast<ParmVarDecl>(D)->getType();
+
+  if (!isFunctionLike(*T)) {
+    S.Diag(AL.getLoc(), diag::err_called_once_attribute_wrong_type);
+    return;
+  }
+
+  D->addAttr(::new (S.Context) CalledOnceAttr(S.Context, AL));
+}
+
 static void handleTransparentUnionAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   // Try to find the underlying union declaration.
   RecordDecl *RD = nullptr;
@@ -7473,6 +7524,9 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
     break;
   case ParsedAttr::AT_Callback:
     handleCallbackAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_CalledOnce:
+    handleCalledOnceAttr(S, D, AL);
     break;
   case ParsedAttr::AT_CUDAGlobal:
     handleGlobalAttr(S, D, AL);

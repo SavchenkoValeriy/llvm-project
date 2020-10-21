@@ -2922,6 +2922,17 @@ def err_callback_callee_is_variadic : Error<
   "'callback' attribute callee may not be variadic">;
 def err_callback_implicit_this_not_available : Error<
   "'callback' argument at position %0 references unavailable implicit 'this'">;
+def err_called_once_attribute_wrong_type : Error<
+  "'called_once' attribute only applies to function-like parameters">;
+def warn_called_once_gets_called_twice : Warning<
+  "%0 parameter marked 'called_once' is called twice">;
+def warn_called_once_never_called : Warning<
+  "%select{|captured }1%0 parameter marked 'called_once' is never called">;
+def warn_called_once_never_called_when : Warning<
+  "%0 parameter marked 'called_once' is never called when %select{"
+  "taking true branch|taking false branch|handling this case|"
+  "none of the cases applies|entering the loop|skipping the loop}1">;
+def note_called_once_gets_called_twice : Note<"previous call is here">;
 def err_init_method_bad_return_type : Error<
   "init methods must return an object pointer type, not %0">;
 def err_attribute_invalid_size : Error<
