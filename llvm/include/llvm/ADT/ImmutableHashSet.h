@@ -78,39 +78,34 @@ template <class ValueInfo> class HAMT {
 
   class Node : public RefCountedBase<Node> {
     struct InnerNode final : public TrailingObjects<InnerNode, NodePtr> {
-      BitmapType NodeMap;
-      BitmapType DataMap;
-      size_t Size;
-
       using TrailingType = NodePtr;
     };
 
     struct DataNode final : public TrailingObjects<DataNode, value_type> {
-      size_t Size;
-
       using TrailingType = value_type;
     };
 
-    union ImplType {
+    union TailType {
       InnerNode Inner;
       DataNode Data;
     };
 
-    ImplType Impl;
+    BitmapType NodeMap = 0;
+    BitmapType DataMap = 0;
+    size_t Size;
+    TailType Tail;
 
   public:
     class Factory {
     public:
       Node *addCollision(NodePtr Original, const_value_type_ref NewElement) {
+        assert(Original->isDataNode() && "Only data nodes have collisions");
         DEBUG(llvm::errs()
               << "addCollision(NodePtr Original, const_value_type_ref "
                  "NewElement)\n");
-        DataNode &DesugaredOriginal = Original->Impl.Data;
-        const size_t NewSize = DesugaredOriginal.Size + 1;
-        Node *NewNode = allocate<DataNode>(NewSize);
 
-        DataNode &DesugaredNew = NewNode->Impl.Data;
-        DesugaredNew.Size = NewSize;
+        const size_t NewSize = Original->Size + 1;
+        Node *NewNode = allocate<DataNode>(NewSize);
 
         ArrayRef<value_type> OriginalCollisions = Original->getCollisions();
         std::uninitialized_copy(OriginalCollisions.begin(),
@@ -125,14 +120,11 @@ template <class ValueInfo> class HAMT {
 
       Node *replaceCollision(NodePtr Original, const_value_type_ref NewElement,
                              count_t Index) {
+        assert(Original->isDataNode() && "Only data nodes have collisions");
         DEBUG(llvm::errs()
               << "replaceCollision(NodePtr Original, "
                  "const_value_type_ref NewElement, count_t Index)\n");
-        DataNode &DesugaredOriginal = Original->Impl.Data;
-        Node *NewNode = allocate<DataNode>(DesugaredOriginal.Size);
-
-        DataNode &DesugaredNew = NewNode->Impl.Data;
-        DesugaredNew.Size = DesugaredOriginal.Size;
+        Node *NewNode = allocate<DataNode>(Original->Size);
 
         ArrayRef<value_type> OriginalCollisions = Original->getCollisions();
         std::uninitialized_copy(OriginalCollisions.begin(),
@@ -144,15 +136,12 @@ template <class ValueInfo> class HAMT {
       }
 
       Node *removeCollision(NodePtr Original, count_t Offset) {
-        DataNode &DesugaredOriginal = Original->Impl.Data;
-        assert(DesugaredOriginal.Size > 1 &&
-               "Removing collisions from nodes with only 1 collision");
+        assert(Original->isDataNode() && "Only data nodes have collisions");
+        assert(Original->Size > 1 &&
+               "Removing collisions from a node with only 1 collision");
 
-        const size_t NewSize = DesugaredOriginal.Size - 1;
+        const size_t NewSize = Original->Size - 1;
         Node *NewNode = allocate<DataNode>(NewSize);
-
-        DataNode &DesugaredNew = NewNode->Impl.Data;
-        DesugaredNew.Size = NewSize;
 
         ArrayRef<value_type> OriginalCollisions = Original->getCollisions();
         MutableArrayRef<value_type> NewCollisions = NewNode->getCollisions();
@@ -170,16 +159,15 @@ template <class ValueInfo> class HAMT {
       Node *replaceInnerNode(NodePtr Original, NodePtr NewChild,
                              count_t Offset) {
         assert(NewChild && "Nodes can't be null");
+        assert(Original->isInnerNode() && "Only inner nodes have children");
         DEBUG(llvm::errs()
               << "replaceInnerNode(NodePtr Original, NodePtr NewChild, "
                  "count_t Offset)\n");
-        InnerNode &DesugaredOriginal = Original->Impl.Inner;
-        Node *NewNode = allocate<InnerNode>(DesugaredOriginal.Size);
 
-        InnerNode &DesugaredNew = NewNode->Impl.Inner;
-        DesugaredNew.Size = DesugaredOriginal.Size;
-        DesugaredNew.NodeMap = DesugaredOriginal.NodeMap;
-        DesugaredNew.DataMap = DesugaredOriginal.DataMap;
+        Node *NewNode = allocate<InnerNode>(Original->Size);
+
+        NewNode->NodeMap = Original->NodeMap;
+        NewNode->DataMap = Original->DataMap;
         llvm::copy(Original->getAllChildren(),
                    NewNode->getAllChildren().begin());
         NewNode->getInnerChild(Offset) = NewChild;
@@ -189,17 +177,17 @@ template <class ValueInfo> class HAMT {
 
       Node *replaceDataNode(NodePtr Original, const_value_type_ref Element,
                             count_t Offset) {
+        assert(Original->isInnerNode() && "Only inner nodes have children");
         DEBUG(
             llvm::errs() << "replaceDataNode(NodePtr Original, "
                             "const_value_type_ref Element, count_t Offset)\n");
-        Node *NewChild = createDataNode(Element);
-        InnerNode &DesugaredOriginal = Original->Impl.Inner;
-        Node *NewNode = allocate<InnerNode>(DesugaredOriginal.Size);
 
-        InnerNode &DesugaredNew = NewNode->Impl.Inner;
-        DesugaredNew.Size = DesugaredOriginal.Size;
-        DesugaredNew.NodeMap = DesugaredOriginal.NodeMap;
-        DesugaredNew.DataMap = DesugaredOriginal.DataMap;
+        Node *NewChild = createDataNode(Element);
+        Node *NewNode = allocate<InnerNode>(Original->Size);
+
+        NewNode->Size = Original->Size;
+        NewNode->NodeMap = Original->NodeMap;
+        NewNode->DataMap = Original->DataMap;
         llvm::copy(Original->getAllChildren(),
                    NewNode->getAllChildren().begin());
         NewNode->getDataChild(Offset) = NewChild;
@@ -215,6 +203,7 @@ template <class ValueInfo> class HAMT {
             << "mergeValues(shift_t Shift, const_value_type_ref First, hash_t "
                "FirstHash, const_value_type_ref Second, hash_t SecondHash)\n");
         DEBUG(errs() << "Merging " << First << " and " << Second << "\n");
+
         if (LLVM_LIKELY(Shift < getMaxShift(Bits))) {
           hash_t ShiftedMask = getMask(Bits) << Shift;
           DEBUG(errs() << "Population " << countPopulation(ShiftedMask)
@@ -239,11 +228,8 @@ template <class ValueInfo> class HAMT {
 
       Node *createDataNode(const_value_type_ref Data) {
         DEBUG(llvm::errs() << "createDataNode(const_value_type_ref Data)\n");
-        constexpr size_t NewSize = 1;
-        Node *NewNode = allocate<DataNode>(NewSize);
+        Node *NewNode = allocate<DataNode>(1);
 
-        DataNode &DesugaredNew = NewNode->Impl.Data;
-        DesugaredNew.Size = NewSize;
         new (&NewNode->getCollisions()[0]) value_type(Data);
 
         return NewNode;
@@ -252,11 +238,8 @@ template <class ValueInfo> class HAMT {
                            const_value_type_ref Second) {
         DEBUG(llvm::errs() << "createDataNode(const_value_type_ref First, "
                               "const_value_type_ref Second)\n");
-        constexpr size_t NewSize = 2;
-        Node *NewNode = allocate<DataNode>(NewSize);
+        Node *NewNode = allocate<DataNode>(2);
 
-        DataNode &DesugaredNew = NewNode->Impl.Data;
-        DesugaredNew.Size = NewSize;
         new (&NewNode->getCollisions()[0]) value_type(First);
         new (&NewNode->getCollisions()[1]) value_type(Second);
 
@@ -269,10 +252,8 @@ template <class ValueInfo> class HAMT {
         Node *NewNode = allocate<InnerNode>(NewSize);
         Node *Child = createDataNode(Element);
 
-        InnerNode &DesugaredNew = NewNode->Impl.Inner;
-        DesugaredNew.Size = NewSize;
-        DesugaredNew.NodeMap = 0;
-        DesugaredNew.DataMap = BitmapType{1u} << Index;
+        NewNode->NodeMap = 0;
+        NewNode->DataMap = BitmapType{1u} << Index;
         NewNode->getDataChild(0) = Child;
 
         return NewNode;
@@ -280,13 +261,10 @@ template <class ValueInfo> class HAMT {
       Node *createInnerNode(count_t Index, NodePtr Child) {
         DEBUG(
             llvm::errs() << "createInnerNode(count_t Index, NodePtr Child)\n");
-        constexpr size_t NewSize = 1;
-        Node *NewNode = allocate<InnerNode>(NewSize);
+        Node *NewNode = allocate<InnerNode>(1);
 
-        InnerNode &DesugaredNew = NewNode->Impl.Inner;
-        DesugaredNew.Size = NewSize;
-        DesugaredNew.NodeMap = BitmapType{1u} << Index;
-        DesugaredNew.DataMap = 0;
+        NewNode->NodeMap = BitmapType{1u} << Index;
+        NewNode->DataMap = 0;
         NewNode->getInnerChild(0) = Child;
 
         return NewNode;
@@ -299,15 +277,13 @@ template <class ValueInfo> class HAMT {
         DEBUG(errs() << "Indices: " << FirstIndex << ", " << SecondIndex
                      << "\n");
         assert(FirstIndex != SecondIndex);
-        constexpr size_t NewSize = 2;
-        Node *NewNode = allocate<InnerNode>(NewSize);
+
+        Node *NewNode = allocate<InnerNode>(2);
         Node *FirstNode = createDataNode(First);
         Node *SecondNode = createDataNode(Second);
 
-        InnerNode &DesugaredNew = NewNode->Impl.Inner;
-        DesugaredNew.Size = NewSize;
-        DesugaredNew.NodeMap = 0;
-        DesugaredNew.DataMap =
+        NewNode->NodeMap = 0;
+        NewNode->DataMap =
             (BitmapType{1u} << FirstIndex) | (BitmapType{1u} << SecondIndex);
         if (FirstIndex < SecondIndex) {
           NewNode->getDataChild(0) = FirstNode;
@@ -323,25 +299,24 @@ template <class ValueInfo> class HAMT {
       Node *replaceInnerNodeWithData(NodePtr Original, NodePtr NewChild,
                                      count_t IndexBit, count_t NodeOffset) {
         assert(NewChild && "Nodes can't be null");
+        assert(Original->isInnerNode() && "Only inner nodes have children");
+        assert(NewChild->isDataNode() && "Using inner node as a new child");
 
-        InnerNode &DesugaredOriginal = Original->Impl.Inner;
-        assert(DesugaredOriginal.NodeMap & IndexBit &&
+        assert(Original->NodeMap & IndexBit &&
                "Index bit should not correspond to data node");
-        assert(!(DesugaredOriginal.DataMap & IndexBit) &&
+        assert(!(Original->DataMap & IndexBit) &&
                "Should have an inner node for the given index bit");
-        Node *NewNode = allocate<InnerNode>(DesugaredOriginal.Size);
+        Node *NewNode = allocate<InnerNode>(Original->Size);
 
-        InnerNode &DesugaredNew = NewNode->Impl.Inner;
-        DesugaredNew.Size = DesugaredOriginal.Size;
         count_t DataOffset =
-            countPopulation(DesugaredOriginal.DataMap & (IndexBit - 1));
+            countPopulation(Original->DataMap & (IndexBit - 1));
         count_t CanonicalDataOffset =
             Original->getCanonicalDataOffset(DataOffset);
 
         // "Move" given index bit from nodemap...
-        DesugaredNew.NodeMap = DesugaredOriginal.NodeMap ^ IndexBit;
+        NewNode->NodeMap = Original->NodeMap ^ IndexBit;
         // ...to datamap
-        DesugaredNew.DataMap = DesugaredOriginal.DataMap | IndexBit;
+        NewNode->DataMap = Original->DataMap | IndexBit;
 
         ArrayRef<NodePtr> OriginalChildren = Original->getAllChildren();
         MutableArrayRef<NodePtr> NewChildren = NewNode->getAllChildren();
@@ -362,29 +337,29 @@ template <class ValueInfo> class HAMT {
 
       Node *replaceDataNodeWithInner(NodePtr Original, NodePtr NewChild,
                                      count_t IndexBit, count_t DataOffset) {
+        assert(NewChild && "Nodes can't be null");
+        assert(Original->isInnerNode() && "Only inner nodes have children");
+        assert(NewChild->isInnerNode() && "Using data node as a new child");
+
+        assert(!(Original->NodeMap & IndexBit) &&
+               "Index bit should not correspond to inner node");
+        assert(Original->DataMap & IndexBit &&
+               "Should have a data node for the given index bit");
         DEBUG(llvm::errs()
               << "replaceDataNodeWithInner(NodePtr Original, NodePtr "
                  "NewChild, count_t IndexBit, count_t DataOffset)\n");
-        assert(NewChild && "Nodes can't be null");
 
-        InnerNode &DesugaredOriginal = Original->Impl.Inner;
-        assert(!(DesugaredOriginal.NodeMap & IndexBit) &&
-               "Index bit should not correspond to inner node");
-        assert(DesugaredOriginal.DataMap & IndexBit &&
-               "Should have a data node for the given index bit");
-        Node *NewNode = allocate<InnerNode>(DesugaredOriginal.Size);
+        Node *NewNode = allocate<InnerNode>(Original->Size);
 
-        InnerNode &DesugaredNew = NewNode->Impl.Inner;
-        DesugaredNew.Size = DesugaredOriginal.Size;
         count_t NodeOffset =
-            countPopulation(DesugaredOriginal.NodeMap & (IndexBit - 1));
+            countPopulation(Original->NodeMap & (IndexBit - 1));
         count_t CanonicalDataOffset =
             Original->getCanonicalDataOffset(DataOffset);
 
         // "Move" given index bit from datamap...
-        DesugaredNew.DataMap = DesugaredOriginal.DataMap ^ IndexBit;
+        NewNode->DataMap = Original->DataMap ^ IndexBit;
         // ...to nodemap
-        DesugaredNew.NodeMap = DesugaredOriginal.NodeMap | IndexBit;
+        NewNode->NodeMap = Original->NodeMap | IndexBit;
 
         ArrayRef<NodePtr> OriginalChildren = Original->getAllChildren();
         MutableArrayRef<NodePtr> NewChildren = NewNode->getAllChildren();
@@ -408,18 +383,16 @@ template <class ValueInfo> class HAMT {
         DEBUG(
             llvm::errs() << "addDataChild(NodePtr Original, count_t IndexBit, "
                             "const_value_type_ref Element)\n");
+        assert(Original->isInnerNode() && "Only inner nodes have children");
 
-        InnerNode &DesugaredOriginal = Original->Impl.Inner;
-        const size_t NewSize = DesugaredOriginal.Size + 1;
+        const size_t NewSize = Original->Size + 1;
 
         Node *NewNode = allocate<InnerNode>(NewSize);
-        InnerNode &DesugaredNew = NewNode->Impl.Inner;
-        DesugaredNew.Size = NewSize;
-        DesugaredNew.NodeMap = DesugaredOriginal.NodeMap;
-        DesugaredNew.DataMap = DesugaredOriginal.DataMap | IndexBit;
 
-        count_t Offset =
-            countPopulation(DesugaredOriginal.DataMap & (IndexBit - 1));
+        NewNode->NodeMap = Original->NodeMap;
+        NewNode->DataMap = Original->DataMap | IndexBit;
+
+        count_t Offset = countPopulation(Original->DataMap & (IndexBit - 1));
         count_t CanonicalOffset = NewNode->getCanonicalDataOffset(Offset);
 
         ArrayRef<NodePtr> OriginalChildren = Original->getAllChildren();
@@ -437,21 +410,19 @@ template <class ValueInfo> class HAMT {
 
       Node *removeInnerNode(NodePtr Original, count_t IndexBit,
                             count_t Offset) {
-        InnerNode &DesugaredOriginal = Original->Impl.Inner;
-        assert(DesugaredOriginal.Size > 1 &&
+        assert(Original->isInnerNode() && "Only inner nodes have children");
+        assert(Original->Size > 1 &&
                "Removing children from nodes of size 1 doesn't make sense");
-        assert(DesugaredOriginal.NodeMap & IndexBit &&
+        assert(Original->NodeMap & IndexBit &&
                "Index bit should not correspond to data node");
-        assert(!(DesugaredOriginal.DataMap & IndexBit) &&
+        assert(!(Original->DataMap & IndexBit) &&
                "Should have an inner node for the given index bit");
 
-        const size_t NewSize = DesugaredOriginal.Size - 1;
+        const size_t NewSize = Original->Size - 1;
         Node *NewNode = allocate<InnerNode>(NewSize);
 
-        InnerNode &DesugaredNew = NewNode->Impl.Inner;
-        DesugaredNew.Size = NewSize;
-        DesugaredNew.NodeMap = DesugaredOriginal.NodeMap ^ IndexBit;
-        DesugaredNew.DataMap = DesugaredOriginal.DataMap;
+        NewNode->NodeMap = Original->NodeMap ^ IndexBit;
+        NewNode->DataMap = Original->DataMap;
 
         ArrayRef<NodePtr> OriginalChildren = Original->getAllChildren();
         MutableArrayRef<NodePtr> NewChildren = NewNode->getAllChildren();
@@ -465,21 +436,19 @@ template <class ValueInfo> class HAMT {
 
       Node *removeDataChild(NodePtr Original, count_t IndexBit,
                             count_t Offset) {
-        InnerNode &DesugaredOriginal = Original->Impl.Inner;
-        assert(DesugaredOriginal.Size > 1 &&
+        assert(Original->isInnerNode() && "Only inner nodes have children");
+        assert(Original->Size > 1 &&
                "Removing children from nodes of size 1 doesn't make sense");
-        assert(!(DesugaredOriginal.NodeMap & IndexBit) &&
+        assert(!(Original->NodeMap & IndexBit) &&
                "Index bit should not correspond to inner node");
-        assert(DesugaredOriginal.DataMap & IndexBit &&
+        assert(Original->DataMap & IndexBit &&
                "Should have a data node for the given index bit");
 
-        const size_t NewSize = DesugaredOriginal.Size - 1;
+        const size_t NewSize = Original->Size - 1;
         Node *NewNode = allocate<InnerNode>(NewSize);
 
-        InnerNode &DesugaredNew = NewNode->Impl.Inner;
-        DesugaredNew.Size = NewSize;
-        DesugaredNew.NodeMap = DesugaredOriginal.NodeMap;
-        DesugaredNew.DataMap = DesugaredOriginal.DataMap ^ IndexBit;
+        NewNode->NodeMap = Original->NodeMap;
+        NewNode->DataMap = Original->DataMap ^ IndexBit;
         count_t CanonicalOffset = Original->getCanonicalDataOffset(Offset);
 
         ArrayRef<NodePtr> OriginalChildren = Original->getAllChildren();
@@ -512,7 +481,8 @@ template <class ValueInfo> class HAMT {
                                typename NodeType::TrailingType>(Size),
             alignof(Node));
         Node *Result = new (Buffer) Node();
-        new (&Result->Impl) NodeType();
+        Result->Size = Size;
+        new (&Result->Tail) NodeType();
         return Result;
       }
 
@@ -527,10 +497,14 @@ template <class ValueInfo> class HAMT {
       BumpPtrAllocator Arena;
     };
 
-    BitmapType getNodeMap() const { return Impl.Inner.NodeMap; }
-    BitmapType getDataMap() const { return Impl.Inner.DataMap; }
+    BitmapType getNodeMap() const { return NodeMap; }
+    BitmapType getDataMap() const { return DataMap; }
+
+    bool isInnerNode() const { return NodeMap | DataMap; }
+    bool isDataNode() const { return !isInnerNode(); }
+
     MutableArrayRef<NodePtr> getAllChildren() {
-      return {Impl.Inner.template getTrailingObjects<NodePtr>(),
+      return {Tail.Inner.template getTrailingObjects<NodePtr>(),
               getNumberOfChildren()};
     }
 
@@ -552,11 +526,10 @@ template <class ValueInfo> class HAMT {
       return getNumberOfChildren() - 1 - Offset;
     }
 
-    size_t getNumberOfChildren() const { return Impl.Inner.Size; }
+    size_t getNumberOfChildren() const { return Size; }
 
     MutableArrayRef<value_type> getCollisions() {
-      return {Impl.Data.template getTrailingObjects<value_type>(),
-              Impl.Data.Size};
+      return {Tail.Data.template getTrailingObjects<value_type>(), Size};
     }
   };
 
@@ -789,7 +762,7 @@ public:
     Iterator(const NodePtr &Root) {
       assignTopLayer(Root);
       if (Root) {
-        // Make sure we not on root
+        // Make sure we are not on root
         stepDown();
         // Walk to data leafs
         walkToLeafs();

@@ -31,20 +31,20 @@ operator<<(std::ostream &OS, const ImmutableHashSet<T, Info> &Set) {
   return OS << toString(Set);
 }
 
-template <class T> struct DefaultInfo : public ImmutableHasSetInfo<T> {};
+template <class T> struct DefaultInfo : public ImmutableHashSetInfo<T> {};
 
-template <class T> struct AlwaysCollisionInfo : public ImmutableHasSetInfo<T> {
+template <class T> struct AlwaysCollisionInfo : public ImmutableHashSetInfo<T> {
   static detail::hash_t
-  getHash(typename ImmutableHasSetInfo<T>::key_type_ref Key) {
+  getHash(typename ImmutableHashSetInfo<T>::key_type_ref Key) {
     return 1u;
   }
 };
 
 template <class T>
-struct FrequentCollisionInfo : public ImmutableHasSetInfo<T> {
+struct FrequentCollisionInfo : public ImmutableHashSetInfo<T> {
   static detail::hash_t
-  getHash(typename ImmutableHasSetInfo<T>::key_type_ref Key) {
-    return ImmutableHasSetInfo<T>::getHash(Key) % 32;
+  getHash(typename ImmutableHashSetInfo<T>::key_type_ref Key) {
+    return ImmutableHashSetInfo<T>::getHash(Key) % 32;
   }
 };
 
