@@ -74,9 +74,10 @@ template <class ValueInfo> class HAMT {
   static constexpr unsigned Bits = 5;
 
   class Node;
-  using NodePtr = Node *;
+  using NodePtr = IntrusiveRefCntPtr<Node>;
 
-  class Node : public RefCountedBase<Node> {
+  class Node {
+  private:
     struct InnerNode final : public TrailingObjects<InnerNode, NodePtr> {
       using TrailingType = NodePtr;
     };
@@ -89,11 +90,6 @@ template <class ValueInfo> class HAMT {
       InnerNode Inner;
       DataNode Data;
     };
-
-    BitmapType NodeMap = 0;
-    BitmapType DataMap = 0;
-    size_t Size;
-    TailType Tail;
 
   public:
     class Factory {
@@ -165,11 +161,12 @@ template <class ValueInfo> class HAMT {
                  "count_t Offset)\n");
 
         Node *NewNode = allocate<InnerNode>(Original->Size);
+        ArrayRef<NodePtr> Children = Original->getAllChildren();
 
         NewNode->NodeMap = Original->NodeMap;
         NewNode->DataMap = Original->DataMap;
-        llvm::copy(Original->getAllChildren(),
-                   NewNode->getAllChildren().begin());
+        std::uninitialized_copy(Children.begin(), Children.end(),
+                                NewNode->getAllChildren().begin());
         NewNode->getInnerChild(Offset) = NewChild;
 
         return NewNode;
@@ -184,12 +181,13 @@ template <class ValueInfo> class HAMT {
 
         Node *NewChild = createDataNode(Element);
         Node *NewNode = allocate<InnerNode>(Original->Size);
+        ArrayRef<NodePtr> Children = Original->getAllChildren();
 
         NewNode->Size = Original->Size;
         NewNode->NodeMap = Original->NodeMap;
         NewNode->DataMap = Original->DataMap;
-        llvm::copy(Original->getAllChildren(),
-                   NewNode->getAllChildren().begin());
+        std::uninitialized_copy(Children.begin(), Children.end(),
+                                NewNode->getAllChildren().begin());
         NewNode->getDataChild(Offset) = NewChild;
 
         return NewNode;
@@ -254,7 +252,7 @@ template <class ValueInfo> class HAMT {
 
         NewNode->NodeMap = 0;
         NewNode->DataMap = BitmapType{1u} << Index;
-        NewNode->getDataChild(0) = Child;
+        new (&NewNode->getDataChild(0)) NodePtr(Child);
 
         return NewNode;
       }
@@ -265,7 +263,7 @@ template <class ValueInfo> class HAMT {
 
         NewNode->NodeMap = BitmapType{1u} << Index;
         NewNode->DataMap = 0;
-        NewNode->getInnerChild(0) = Child;
+        new (&NewNode->getInnerChild(0)) NodePtr(Child);
 
         return NewNode;
       }
@@ -285,12 +283,13 @@ template <class ValueInfo> class HAMT {
         NewNode->NodeMap = 0;
         NewNode->DataMap =
             (BitmapType{1u} << FirstIndex) | (BitmapType{1u} << SecondIndex);
+
         if (FirstIndex < SecondIndex) {
-          NewNode->getDataChild(0) = FirstNode;
-          NewNode->getDataChild(1) = SecondNode;
+          new (&NewNode->getDataChild(0)) NodePtr(FirstNode);
+          new (&NewNode->getDataChild(1)) NodePtr(SecondNode);
         } else {
-          NewNode->getDataChild(0) = SecondNode;
-          NewNode->getDataChild(1) = FirstNode;
+          new (&NewNode->getDataChild(0)) NodePtr(SecondNode);
+          new (&NewNode->getDataChild(1)) NodePtr(FirstNode);
         }
 
         return NewNode;
@@ -321,16 +320,19 @@ template <class ValueInfo> class HAMT {
         ArrayRef<NodePtr> OriginalChildren = Original->getAllChildren();
         MutableArrayRef<NodePtr> NewChildren = NewNode->getAllChildren();
 
-        std::copy_n(OriginalChildren.begin(), NodeOffset, NewChildren.begin());
+        std::uninitialized_copy_n(OriginalChildren.begin(), NodeOffset,
+                                  NewChildren.begin());
         // Skip OriginalChildren[NodeOffset] because this is the
         // element we are replacing here.
-        std::copy(OriginalChildren.begin() + NodeOffset + 1,
-                  OriginalChildren.begin() + CanonicalDataOffset + 1,
-                  NewChildren.begin() + NodeOffset);
-        NewNode->getAllChildren()[CanonicalDataOffset] = NewChild;
-        std::copy(OriginalChildren.begin() + CanonicalDataOffset + 1,
-                  OriginalChildren.end(),
-                  NewChildren.begin() + CanonicalDataOffset + 1);
+        std::uninitialized_copy(OriginalChildren.begin() + NodeOffset + 1,
+                                OriginalChildren.begin() + CanonicalDataOffset +
+                                    1,
+                                NewChildren.begin() + NodeOffset);
+        new (&NewNode->getAllChildren()[CanonicalDataOffset]) NodePtr(NewChild);
+        std::uninitialized_copy(OriginalChildren.begin() + CanonicalDataOffset +
+                                    1,
+                                OriginalChildren.end(),
+                                NewChildren.begin() + CanonicalDataOffset + 1);
 
         return NewNode;
       }
@@ -364,16 +366,18 @@ template <class ValueInfo> class HAMT {
         ArrayRef<NodePtr> OriginalChildren = Original->getAllChildren();
         MutableArrayRef<NodePtr> NewChildren = NewNode->getAllChildren();
 
-        std::copy_n(OriginalChildren.begin(), NodeOffset, NewChildren.begin());
-        NewNode->getInnerChild(NodeOffset) = NewChild;
-        std::copy(OriginalChildren.begin() + NodeOffset,
-                  OriginalChildren.begin() + CanonicalDataOffset,
-                  NewChildren.begin() + NodeOffset + 1);
+        std::uninitialized_copy_n(OriginalChildren.begin(), NodeOffset,
+                                  NewChildren.begin());
+        new (&NewNode->getInnerChild(NodeOffset)) NodePtr(NewChild);
+        std::uninitialized_copy(OriginalChildren.begin() + NodeOffset,
+                                OriginalChildren.begin() + CanonicalDataOffset,
+                                NewChildren.begin() + NodeOffset + 1);
         // Skip OriginalChildren[CanonicalDataOffset] because this is the
         // element we are replacing here.
-        std::copy(OriginalChildren.begin() + CanonicalDataOffset + 1,
-                  OriginalChildren.end(),
-                  NewChildren.begin() + CanonicalDataOffset + 1);
+        std::uninitialized_copy(OriginalChildren.begin() + CanonicalDataOffset +
+                                    1,
+                                OriginalChildren.end(),
+                                NewChildren.begin() + CanonicalDataOffset + 1);
 
         return NewNode;
       }
@@ -398,12 +402,12 @@ template <class ValueInfo> class HAMT {
         ArrayRef<NodePtr> OriginalChildren = Original->getAllChildren();
         MutableArrayRef<NodePtr> NewChildren = NewNode->getAllChildren();
 
-        std::copy_n(OriginalChildren.begin(), CanonicalOffset,
-                    NewChildren.begin());
-        NewChildren[CanonicalOffset] = createDataNode(Element);
-        std::copy(OriginalChildren.begin() + CanonicalOffset,
-                  OriginalChildren.end(),
-                  NewChildren.begin() + CanonicalOffset + 1);
+        std::uninitialized_copy_n(OriginalChildren.begin(), CanonicalOffset,
+                                  NewChildren.begin());
+        new (&NewChildren[CanonicalOffset]) NodePtr(createDataNode(Element));
+        std::uninitialized_copy(OriginalChildren.begin() + CanonicalOffset,
+                                OriginalChildren.end(),
+                                NewChildren.begin() + CanonicalOffset + 1);
 
         return NewNode;
       }
@@ -427,9 +431,11 @@ template <class ValueInfo> class HAMT {
         ArrayRef<NodePtr> OriginalChildren = Original->getAllChildren();
         MutableArrayRef<NodePtr> NewChildren = NewNode->getAllChildren();
 
-        std::copy_n(OriginalChildren.begin(), Offset, NewChildren.begin());
-        std::copy(OriginalChildren.begin() + Offset + 1, OriginalChildren.end(),
-                  NewChildren.begin() + Offset);
+        std::uninitialized_copy_n(OriginalChildren.begin(), Offset,
+                                  NewChildren.begin());
+        std::uninitialized_copy(OriginalChildren.begin() + Offset + 1,
+                                OriginalChildren.end(),
+                                NewChildren.begin() + Offset);
 
         return NewNode;
       }
@@ -454,14 +460,17 @@ template <class ValueInfo> class HAMT {
         ArrayRef<NodePtr> OriginalChildren = Original->getAllChildren();
         MutableArrayRef<NodePtr> NewChildren = NewNode->getAllChildren();
 
-        std::copy_n(OriginalChildren.begin(), CanonicalOffset,
-                    NewChildren.begin());
-        std::copy(OriginalChildren.begin() + CanonicalOffset + 1,
-                  OriginalChildren.end(),
-                  NewChildren.begin() + CanonicalOffset);
+        std::uninitialized_copy_n(OriginalChildren.begin(), CanonicalOffset,
+                                  NewChildren.begin());
+        // Skip element with CanonicalOffset index
+        std::uninitialized_copy(OriginalChildren.begin() + CanonicalOffset + 1,
+                                OriginalChildren.end(),
+                                NewChildren.begin() + CanonicalOffset);
 
         return NewNode;
       }
+
+      void release(Node *N) {}
 
       Factory()
           : Allocator(reinterpret_cast<uintptr_t>(new BumpPtrAllocator())) {}
@@ -482,6 +491,7 @@ template <class ValueInfo> class HAMT {
             alignof(Node));
         Node *Result = new (Buffer) Node();
         Result->Size = Size;
+        Result->Owner = this;
         new (&Result->Tail) NodeType();
         return Result;
       }
@@ -493,8 +503,6 @@ template <class ValueInfo> class HAMT {
       }
 
       uintptr_t Allocator;
-
-      BumpPtrAllocator Arena;
     };
 
     BitmapType getNodeMap() const { return NodeMap; }
@@ -531,6 +539,27 @@ template <class ValueInfo> class HAMT {
     MutableArrayRef<value_type> getCollisions() {
       return {Tail.Data.template getTrailingObjects<value_type>(), Size};
     }
+
+    void Retain() { ++RefCount; }
+    void Release() {
+      assert(RefCount > 0 && "Reference count is already zero.");
+      if (--RefCount == 0) {
+        if (isInnerNode()) {
+          for (NodePtr Child : getAllChildren()) {
+            Child->Release();
+          }
+        }
+        Owner->release(this);
+      }
+    }
+
+  private:
+    BitmapType NodeMap = 0;
+    BitmapType DataMap = 0;
+    size_t Size;
+    size_t RefCount = 0;
+    Factory *Owner;
+    TailType Tail;
   };
 
   NodePtr Root;
