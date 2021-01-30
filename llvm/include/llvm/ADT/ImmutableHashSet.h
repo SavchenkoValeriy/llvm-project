@@ -601,7 +601,7 @@ public:
         ArrayRef<value_type> Collisions = Node->getCollisions();
 
         for (count_t Index = 0; Index < Collisions.size(); ++Index)
-          if (ValueInfo::areEqual(Collisions[Index], Element))
+          if (ValueInfo::areKeysEqual(Collisions[Index], Element))
             return {NodeFactory.replaceCollision(Node, Element, Index), false};
 
         return {NodeFactory.addCollision(Node, Element), true};
@@ -627,7 +627,7 @@ public:
       if (Node->getDataMap() & IndexBit) {
         count_t Offset = countPopulation(Node->getDataMap() & (IndexBit - 1));
         const_value_type_ref StoredValue = Node->getData(Offset);
-        if (ValueInfo::areEqual(StoredValue, Element))
+        if (ValueInfo::areKeysEqual(ValueInfo::getKey(StoredValue), Element))
           return {NodeFactory.replaceDataNode(Node, Element, Offset), false};
 
         NodePtr NewChild =
@@ -647,7 +647,7 @@ public:
         ArrayRef<value_type> Collisions = Node->getCollisions();
 
         for (count_t Index = 0; Index < Collisions.size(); ++Index)
-          if (ValueInfo::areEqual(Collisions[Index], Element)) {
+          if (ValueInfo::areKeysEqual(Collisions[Index], Element)) {
             RemoveKind Kind = RemoveKind::Modified;
             switch (Collisions.size()) {
             case 1:
@@ -718,7 +718,7 @@ public:
       if (Node->getDataMap() & IndexBit) {
         count_t Offset = countPopulation(Node->getDataMap() & (IndexBit - 1));
         const_value_type_ref StoredValue = Node->getData(Offset);
-        if (ValueInfo::areEqual(StoredValue, Element)) {
+        if (ValueInfo::areKeysEqual(StoredValue, Element)) {
           switch (Node->getNumberOfChildren()) {
           case 1:
             // That is the only child, so we can remove both this child
@@ -893,23 +893,29 @@ public:
 
         // When we didn't reach the maximal depth, collisions are not possible.
         DEBUG(errs() << StoredValue << " vs. " << Key << "\n");
-        if (ValueInfo::areEqual(StoredValue, Key))
+        if (ValueInfo::areKeysEqual(StoredValue, Key))
           return &StoredValue;
       }
 
       return nullptr;
     }
     for (const_value_type_ref StoredValue : Node->getCollisions())
-      if (ValueInfo::areEqual(StoredValue, Key))
+      if (ValueInfo::areKeysEqual(StoredValue, Key))
         return &StoredValue;
 
     return nullptr;
   }
 
-  using RootType = NodePtr;
-  HAMT(RootType Root) : Root(Root) {}
+  HAMT(NodePtr Root) : Root(std::move(Root)) {}
+  using RawRootType = Node *;
+  HAMT(RawRootType Root) : Root(Root) {}
 
-  NodePtr getRoot() const { return Root; }
+  RawRootType getRoot() const {
+    if (Root)
+      Root->Retain();
+
+    return Root.get();
+  }
 
   size_t getSize() const {
     size_t Size = 0;
@@ -925,14 +931,18 @@ public:
 
   bool isEmpty() const { return getSize() == 0; }
 
-  bool isEqual(const HAMT &RHS) const {
-    return getSize() == RHS.getSize() && areTreesEqual(Root, RHS.Root);
-  }
+  bool isEqual(const HAMT &RHS) const { return areTreesEqual(Root, RHS.Root); }
 
 private:
   static bool areTreesEqual(NodePtr LHS, NodePtr RHS, count_t Depth = 0) {
     if (LHS == RHS)
       return true;
+
+    if (LHS == nullptr || RHS == nullptr)
+      return false;
+
+    if (LHS->getNumberOfChildren() != RHS->getNumberOfChildren())
+      return false;
 
     if (Depth == getMaxDepth(Bits)) {
       return areCollisionsEqual(LHS->getCollisions(), RHS->getCollisions());
@@ -975,7 +985,7 @@ private:
                                  ArrayRef<value_type> RHS) {
     return llvm::all_of(LHS, [RHS](const_value_type_ref Needle) {
       return llvm::find_if(RHS, [Needle](const_value_type_ref Candidate) {
-        return ValueInfo::areEqual(Needle, Candidate);
+        return ValueInfo::areKeysEqual(Needle, Candidate);
       });
     });
   }
@@ -990,6 +1000,9 @@ template <class T> struct ImmutableHashSetInfo {
   using const_value_type_ref = const T &;
   using key_type = const T;
   using key_type_ref = const T &;
+  using data_type = const T;
+  using data_type_ref = const T &;
+
   using ProfileInfo = ImutProfileInfo<T>;
 
   static void Profile(FoldingSetNodeID ID, const_value_type_ref Value) {
@@ -1001,7 +1014,14 @@ template <class T> struct ImmutableHashSetInfo {
     ProfileInfo::Profile(ID, Key);
     return ID.ComputeHash();
   }
+
+  static key_type_ref getKey(const_value_type_ref D) { return D; }
+  static data_type_ref getData(const_value_type_ref) { return true; }
+
   static bool areEqual(const_value_type_ref LHS, const_value_type_ref RHS) {
+    return areKeysEqual(LHS, RHS);
+  }
+  static bool areKeysEqual(const_value_type_ref LHS, const_value_type_ref RHS) {
     return LHS == RHS;
   }
 };
@@ -1047,10 +1067,10 @@ public:
   size_t getSize() const { return Impl.getSize(); }
   bool isEmpty() const { return Impl.isEmpty(); }
 
-  using RootType = typename Trie::RootType;
-  RootType getRoot() const { return Impl.getRoot(); }
+  using RawRootType = typename Trie::RawRootType;
+  RawRootType getRoot() const { return Impl.getRoot(); }
 
-  ImmutableHashSet(RootType Root) : Impl(Root) {}
+  ImmutableHashSet(RawRootType Root) : Impl(Root) {}
 
   bool operator==(const ImmutableHashSet &RHS) const {
     return Impl.isEqual(RHS.Impl);

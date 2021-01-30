@@ -154,7 +154,7 @@ struct ProgramStatePartialTrait<llvm::ImmutableHashMap<Key, Data, Info>> {
   using lookup_type = const value_type *;
 
   static data_type MakeData(void *const *p) {
-    return p ? data_type((typename data_type::RootType) * p)
+    return p ? data_type((typename data_type::RawRootType) * p)
              : data_type(nullptr);
   }
 
@@ -193,7 +193,7 @@ struct ProgramStatePartialTrait<llvm::ImmutableHashSet<Key, Info>> {
   using key_type = Key;
 
   static data_type MakeData(void *const *p) {
-    return p ? data_type((typename data_type::RootType) * p)
+    return p ? data_type((typename data_type::RawRootType) * p)
              : data_type(nullptr);
   }
 

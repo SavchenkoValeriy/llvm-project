@@ -44,20 +44,25 @@ template <class KeyTy, class DataTy> struct ImmutableHashMapInfo {
     return ID.ComputeHash();
   }
   static bool areEqual(const_value_type_ref LHS, const_value_type_ref RHS) {
-    return areEqual(LHS.first, RHS.first);
+    return areKeysEqual(LHS, RHS) && areEqual(getData(LHS), getData(RHS));
   }
-  static bool areEqual(const_value_type_ref LHS, key_type_ref RHS) {
-    return areEqual(LHS.first, RHS);
+  static bool areKeysEqual(const_value_type_ref LHS, const_value_type_ref RHS) {
+    return areKeysEqual(getKey(LHS), getKey(RHS));
   }
-  static bool areEqual(key_type_ref LHS, const_value_type_ref RHS) {
-    return areEqual(RHS, LHS);
+  static bool areKeysEqual(const_value_type_ref LHS, key_type_ref RHS) {
+    return areKeysEqual(getKey(LHS), RHS);
+  }
+  static bool areKeysEqual(key_type_ref LHS, const_value_type_ref RHS) {
+    return areKeysEqual(RHS, LHS);
   }
 
-  static bool areEqual(key_type_ref LHS, key_type_ref RHS) {
+  static bool areEqual(data_type_ref LHS, data_type_ref RHS) {
+    return LHS == RHS;
+  }
+  static bool areKeysEqual(key_type_ref LHS, key_type_ref RHS) {
     return LHS == RHS;
   }
   static key_type_ref getKey(const_value_type_ref Value) { return Value.first; }
-
   static data_type_ref getData(const_value_type_ref Value) {
     return Value.second;
   }
@@ -118,10 +123,10 @@ public:
   size_t getSize() const { return Impl.getSize(); }
   bool isEmpty() const { return Impl.isEmpty(); }
 
-  using RootType = typename Trie::RootType;
-  RootType getRoot() const { return Impl.getRoot(); }
+  using RawRootType = typename Trie::RawRootType;
+  RawRootType getRoot() const { return Impl.getRoot(); }
 
-  ImmutableHashMap(RootType Root) : Impl(Root) {}
+  ImmutableHashMap(RawRootType Root) : Impl(Root) {}
 
   bool operator==(const ImmutableHashMap &RHS) const {
     return Impl.isEqual(RHS.Impl);

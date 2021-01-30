@@ -21,7 +21,7 @@
 #include "clang/StaticAnalyzer/Core/PathSensitive/SValBuilder.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/Store.h"
 #include "llvm/ADT/FoldingSet.h"
-#include "llvm/ADT/ImmutableMap.h"
+#include "llvm/ADT/ImmutableHashMap.h"
 #include "llvm/Support/Allocator.h"
 #include <utility>
 
@@ -71,8 +71,8 @@ template <typename T> struct ProgramStateTrait {
 ///  values will never change.
 class ProgramState : public llvm::FoldingSetNode {
 public:
-  typedef llvm::ImmutableSet<llvm::APSInt*>                IntSetTy;
-  typedef llvm::ImmutableMap<void*, void*>                 GenericDataMap;
+  typedef llvm::ImmutableHashSet<llvm::APSInt *> IntSetTy;
+  typedef llvm::ImmutableHashMap<void *, void *> GenericDataMap;
 
 private:
   void operator=(const ProgramState& R) = delete;
