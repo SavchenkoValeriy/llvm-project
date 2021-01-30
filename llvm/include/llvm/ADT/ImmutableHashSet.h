@@ -76,6 +76,8 @@ template <class ValueInfo> class HAMT {
   class Node;
   using NodePtr = IntrusiveRefCntPtr<Node>;
 
+  class RootNode;
+
   class Node {
   private:
     struct InnerNode final : public TrailingObjects<InnerNode, NodePtr> {
@@ -470,7 +472,21 @@ template <class ValueInfo> class HAMT {
         return NewNode;
       }
 
+      RootNode *createRootNode(NodePtr Node, size_t Size, hash_t Hash) {
+        RootNode *&CachedRoot = getCachedRoot(Node, Size, Hash);
+
+        if (CachedRoot)
+          return CachedRoot;
+
+        void *Buffer =
+            getAllocator().Allocate(sizeof(RootNode), alignof(RootNode));
+        RootNode *Result = new (Buffer) RootNode(Node, Size, Hash, this);
+        CachedRoot = Result;
+        return Result;
+      }
+
       void release(Node *N) {}
+      void release(RootNode *R) {}
 
       Factory()
           : Allocator(reinterpret_cast<uintptr_t>(new BumpPtrAllocator())) {}
@@ -496,6 +512,18 @@ template <class ValueInfo> class HAMT {
         return Result;
       }
 
+      RootNode *&getCachedRoot(NodePtr Node, size_t Size, hash_t Hash) {
+        RootNode Tmp(Node, Size, Hash, this);
+        Tmp.Retain();
+
+        RootNode **Result = &RootCache[Hash];
+        for (; *Result != nullptr; Result = &((*Result)->Next)) {
+          if (HAMT(*Result).isEqual(HAMT(&Tmp)))
+            break;
+        }
+        return *Result;
+      }
+
       bool ownsAllocator() const { return (Allocator & 0x1) == 0; }
 
       BumpPtrAllocator &getAllocator() const {
@@ -503,6 +531,7 @@ template <class ValueInfo> class HAMT {
       }
 
       uintptr_t Allocator;
+      DenseMap<hash_t, RootNode *> RootCache;
     };
 
     BitmapType getNodeMap() const { return NodeMap; }
@@ -562,7 +591,37 @@ template <class ValueInfo> class HAMT {
     TailType Tail;
   };
 
-  NodePtr Root;
+  class RootNode {
+  public:
+    RootNode(NodePtr Node, size_t Size, hash_t Hash,
+             typename Node::Factory *Owner)
+        : Node(Node), Size(Size), JoinedHash(Hash), Owner(Owner) {}
+
+    void Retain() { ++RefCount; }
+
+    void Release() {
+      assert(RefCount > 0 && "Reference count is already zero.");
+      if (--RefCount == 0) {
+        Owner->release(this);
+      }
+    }
+
+    NodePtr Node;
+    size_t Size;
+    hash_t JoinedHash = 0;
+
+  private:
+    size_t RefCount = 0;
+    typename Node::Factory *Owner;
+    // Caching data
+    RootNode *Prev = nullptr;
+    RootNode *Next = nullptr;
+
+    friend class Node::Factory;
+  };
+
+  using RootNodeRef = IntrusiveRefCntPtr<RootNode>;
+  RootNodeRef Root;
 
   enum class RemoveKind { None, Modified, Trivial, Removed };
 
@@ -572,28 +631,58 @@ public:
     LLVM_NODISCARD HAMT getEmptySet() { return {nullptr}; }
     LLVM_NODISCARD HAMT add(HAMT Trie, const_value_type_ref Element) {
       hash_t Hash = ValueInfo::getHash(Element);
-      auto Result = addImpl(Trie.Root, Element, Hash);
-      return {Result.first};
+      NodePtr NewRootNode;
+      size_t NewSize;
+      hash_t WholeTrieHash;
+
+      if (!Trie.Root) {
+        NewRootNode = createTrie(Element, Hash);
+        NewSize = 1;
+        WholeTrieHash = Hash;
+      } else {
+        auto Result = addImpl(Trie.Root->Node, Element, Hash);
+        NewRootNode = Result.first;
+        NewSize = Trie.Root->Size;
+        WholeTrieHash = Trie.Root->JoinedHash;
+        if (Result.second) {
+          ++NewSize;
+          WholeTrieHash ^= Hash;
+        }
+      }
+
+      return NodeFactory.createRootNode(NewRootNode, NewSize, WholeTrieHash);
     }
     LLVM_NODISCARD HAMT remove(HAMT Trie, key_type_ref Element) {
       if (Trie.isEmpty())
         return Trie;
 
       hash_t Hash = ValueInfo::getHash(Element);
-      auto Result = removeImpl(Trie.Root, Element, Hash);
+      auto Result = removeImpl(Trie.Root->Node, Element, Hash);
       assert(Result.second != RemoveKind::Trivial &&
              "Simplification of trivial paths should be finished before "
              "finalizing the result");
       if (Result.second == RemoveKind::None)
         return Trie;
 
-      return {Result.first};
+      if (Result.first == nullptr)
+        return {nullptr};
+
+      assert(Trie.Root->Size > 1 &&
+             "Removed the only child and still have a root");
+      return NodeFactory.createRootNode(Result.first, Trie.Root->Size - 1,
+                                        Trie.Root->JoinedHash ^ Hash);
     }
 
     Factory() = default;
     Factory(BumpPtrAllocator &Alloc) : NodeFactory(Alloc) {}
 
   private:
+    LLVM_NODISCARD NodePtr createTrie(const_value_type_ref Element,
+                                      hash_t Hash) {
+      count_t Index = Hash & getMask(Bits);
+      return NodeFactory.createInnerNode(Index, Element);
+    }
+
     LLVM_NODISCARD std::pair<NodePtr, bool>
     addImpl(NodePtr Node, const_value_type_ref Element, hash_t Hash,
             shift_t Shift = 0) {
@@ -609,10 +698,6 @@ public:
 
       hash_t ShiftedMask = getMask(Bits) << Shift;
       count_t Index = (Hash & ShiftedMask) >> Shift;
-
-      if (Node == nullptr) {
-        return {NodeFactory.createInnerNode(Index, Element), true};
-      }
 
       count_t IndexBit = BitmapType{1u} << Index;
 
@@ -788,7 +873,7 @@ public:
     bool operator!=(const Iterator &RHS) const { return !operator==(RHS); }
 
   private:
-    Iterator(const NodePtr &Root) {
+    Iterator(RootNodeRef Root) {
       assignTopLayer(Root);
       if (Root) {
         // Make sure we are not on root
@@ -798,7 +883,7 @@ public:
       }
     }
 
-    Iterator(const NodePtr &Root, EndTag Tag) { assignTopLayer(Root); }
+    Iterator(RootNodeRef Root, EndTag Tag) { assignTopLayer(Root); }
 
     void walkToLeafs() {
       // Check if there are any more data points left in the current layer
@@ -840,7 +925,9 @@ public:
 
     using Layer = ArrayRef<NodePtr>;
 
-    void assignTopLayer(const NodePtr &Root) { Layers[0] = Layer(&Root, 1); }
+    void assignTopLayer(RootNodeRef Root) {
+      Layers[0] = Root ? Layer(&Root->Node, 1) : Layer(nullptr, 1);
+    }
 
     Layer &getCurrentLayer() { return Layers[Depth]; }
     const Layer &getCurrentLayer() const { return Layers[Depth]; }
@@ -871,7 +958,7 @@ public:
     if (Root == nullptr)
       return nullptr;
 
-    NodePtr Node = Root;
+    NodePtr Node = Root->Node;
     hash_t Hash = ValueInfo::getHash(Key);
 
     DEBUG(errs() << "Max depth: " << getMaxDepth(Bits) << ", "
@@ -907,7 +994,7 @@ public:
   }
 
   HAMT(NodePtr Root) : Root(std::move(Root)) {}
-  using RawRootType = Node *;
+  using RawRootType = RootNode *;
   HAMT(RawRootType Root) : Root(Root) {}
 
   RawRootType getRoot() const {
@@ -917,23 +1004,24 @@ public:
     return Root.get();
   }
 
-  size_t getSize() const {
-    size_t Size = 0;
-    if (Root != nullptr) {
-      for (auto It = Iterator(*this),
-                End = Iterator(*this, typename Iterator::EndTag{});
-           It != End; ++It) {
-        ++Size;
-      }
-    }
-    return Size;
-  }
+  size_t getSize() const { return Root ? Root->Size : 0; }
 
   bool isEmpty() const { return getSize() == 0; }
 
   bool isEqual(const HAMT &RHS) const { return areTreesEqual(Root, RHS.Root); }
 
 private:
+  static bool areTreesEqual(RootNodeRef LHS, RootNodeRef RHS) {
+    if (LHS == RHS)
+      return true;
+
+    if (LHS == nullptr || RHS == nullptr)
+      return false;
+
+    return LHS->Size == RHS->Size && LHS->JoinedHash == RHS->JoinedHash &&
+           areTreesEqual(LHS->Node, RHS->Node);
+  }
+
   static bool areTreesEqual(NodePtr LHS, NodePtr RHS, count_t Depth = 0) {
     if (LHS == RHS)
       return true;
@@ -985,8 +1073,8 @@ private:
                                  ArrayRef<value_type> RHS) {
     return llvm::all_of(LHS, [RHS](const_value_type_ref Needle) {
       return llvm::find_if(RHS, [Needle](const_value_type_ref Candidate) {
-        return ValueInfo::areKeysEqual(Needle, Candidate);
-      });
+               return ValueInfo::areEqual(Needle, Candidate);
+             }) != RHS.end();
     });
   }
 };
