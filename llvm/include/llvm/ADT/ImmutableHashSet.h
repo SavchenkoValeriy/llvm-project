@@ -473,20 +473,30 @@ template <class ValueInfo> class HAMT {
       }
 
       RootNode *createRootNode(NodePtr Node, size_t Size, hash_t Hash) {
-        RootNode *&CachedRoot = getCachedRoot(Node, Size, Hash);
+        auto CachedRoot = getCachedRoot(Node, Size, Hash);
 
-        if (CachedRoot)
-          return CachedRoot;
+        if (CachedRoot.first)
+          return CachedRoot.first;
 
         void *Buffer =
             getAllocator().Allocate(sizeof(RootNode), alignof(RootNode));
         RootNode *Result = new (Buffer) RootNode(Node, Size, Hash, this);
-        CachedRoot = Result;
+        CachedRoot.first = Result;
+        Result->Prev = CachedRoot.second;
         return Result;
       }
 
       void release(Node *N) {}
-      void release(RootNode *R) {}
+      void release(RootNode *R) {
+        if (R->Prev) {
+          R->Prev->Next = R->Next;
+        } else {
+          RootCache[R->JoinedHash] = R->Next;
+        }
+
+        if (R->Next)
+          R->Next->Prev = R->Prev;
+      }
 
       Factory()
           : Allocator(reinterpret_cast<uintptr_t>(new BumpPtrAllocator())) {}
@@ -512,16 +522,22 @@ template <class ValueInfo> class HAMT {
         return Result;
       }
 
-      RootNode *&getCachedRoot(NodePtr Node, size_t Size, hash_t Hash) {
+      std::pair<RootNode *&, RootNode *>
+      getCachedRoot(NodePtr Node, size_t Size, hash_t Hash) {
         RootNode Tmp(Node, Size, Hash, this);
         Tmp.Retain();
 
         RootNode **Result = &RootCache[Hash];
-        for (; *Result != nullptr; Result = &((*Result)->Next)) {
+        RootNode *Prev = nullptr;
+        for (; *Result != nullptr;
+             Prev = *Result, Result = &((*Result)->Next)) {
+          DEBUG(llvm::errs() << "Iteration #" << i++ << ": " << *Result
+                             << " -> " << (*Result)->Next << "\n");
+
           if (HAMT(*Result).isEqual(HAMT(&Tmp)))
             break;
         }
-        return *Result;
+        return {*Result, Prev};
       }
 
       bool ownsAllocator() const { return (Allocator & 0x1) == 0; }
@@ -623,14 +639,13 @@ template <class ValueInfo> class HAMT {
   using RootNodeRef = IntrusiveRefCntPtr<RootNode>;
   RootNodeRef Root;
 
-  enum class RemoveKind { None, Modified, Trivial, Removed };
-
 public:
   class Factory {
   public:
     LLVM_NODISCARD HAMT getEmptySet() { return {nullptr}; }
     LLVM_NODISCARD HAMT add(HAMT Trie, const_value_type_ref Element) {
       hash_t Hash = ValueInfo::getHash(Element);
+      hash_t CachingHash = getHashForCaching(Element);
       NodePtr NewRootNode;
       size_t NewSize;
       hash_t WholeTrieHash;
@@ -638,15 +653,16 @@ public:
       if (!Trie.Root) {
         NewRootNode = createTrie(Element, Hash);
         NewSize = 1;
-        WholeTrieHash = Hash;
+        WholeTrieHash = CachingHash;
       } else {
         auto Result = addImpl(Trie.Root->Node, Element, Hash);
         NewRootNode = Result.first;
         NewSize = Trie.Root->Size;
-        WholeTrieHash = Trie.Root->JoinedHash;
+        WholeTrieHash = Trie.Root->JoinedHash ^ CachingHash;
         if (Result.second) {
+          WholeTrieHash ^= getHashForCaching(*Result.second);
+        } else {
           ++NewSize;
-          WholeTrieHash ^= Hash;
         }
       }
 
@@ -658,32 +674,40 @@ public:
 
       hash_t Hash = ValueInfo::getHash(Element);
       auto Result = removeImpl(Trie.Root->Node, Element, Hash);
-      assert(Result.second != RemoveKind::Trivial &&
+      assert(Result.Kind != RemoveResult::Trivial &&
              "Simplification of trivial paths should be finished before "
              "finalizing the result");
-      if (Result.second == RemoveKind::None)
+      if (Result.Kind == RemoveResult::None)
         return Trie;
 
-      if (Result.first == nullptr)
+      if (Result.NewNode == nullptr)
         return {nullptr};
 
       assert(Trie.Root->Size > 1 &&
              "Removed the only child and still have a root");
-      return NodeFactory.createRootNode(Result.first, Trie.Root->Size - 1,
-                                        Trie.Root->JoinedHash ^ Hash);
+      assert(Result.RemovedElement != nullptr);
+      return NodeFactory.createRootNode(
+          Result.NewNode, Trie.Root->Size - 1,
+          Trie.Root->JoinedHash ^ getHashForCaching(*Result.RemovedElement));
     }
 
     Factory() = default;
     Factory(BumpPtrAllocator &Alloc) : NodeFactory(Alloc) {}
 
   private:
+    hash_t getHashForCaching(const_value_type_ref Element) {
+      FoldingSetNodeID ID;
+      ValueInfo::Profile(ID, Element);
+      return ID.ComputeHash();
+    }
+
     LLVM_NODISCARD NodePtr createTrie(const_value_type_ref Element,
                                       hash_t Hash) {
       count_t Index = Hash & getMask(Bits);
       return NodeFactory.createInnerNode(Index, Element);
     }
 
-    LLVM_NODISCARD std::pair<NodePtr, bool>
+    LLVM_NODISCARD std::pair<NodePtr, const_value_type *>
     addImpl(NodePtr Node, const_value_type_ref Element, hash_t Hash,
             shift_t Shift = 0) {
       if (LLVM_UNLIKELY(Shift == getMaxShift(Bits))) {
@@ -691,9 +715,10 @@ public:
 
         for (count_t Index = 0; Index < Collisions.size(); ++Index)
           if (ValueInfo::areKeysEqual(Collisions[Index], Element))
-            return {NodeFactory.replaceCollision(Node, Element, Index), false};
+            return {NodeFactory.replaceCollision(Node, Element, Index),
+                    &Collisions[Index]};
 
-        return {NodeFactory.addCollision(Node, Element), true};
+        return {NodeFactory.addCollision(Node, Element), nullptr};
       }
 
       hash_t ShiftedMask = getMask(Bits) << Shift;
@@ -713,43 +738,50 @@ public:
         count_t Offset = countPopulation(Node->getDataMap() & (IndexBit - 1));
         const_value_type_ref StoredValue = Node->getData(Offset);
         if (ValueInfo::areKeysEqual(ValueInfo::getKey(StoredValue), Element))
-          return {NodeFactory.replaceDataNode(Node, Element, Offset), false};
+          return {NodeFactory.replaceDataNode(Node, Element, Offset),
+                  &StoredValue};
 
         NodePtr NewChild =
             NodeFactory.mergeValues(Shift + Bits, Element, Hash, StoredValue,
                                     ValueInfo::getHash(StoredValue));
         return {NodeFactory.replaceDataNodeWithInner(Node, NewChild, IndexBit,
                                                      Offset),
-                true};
+                nullptr};
       }
-      return {NodeFactory.addDataChild(Node, IndexBit, Element), true};
+      return {NodeFactory.addDataChild(Node, IndexBit, Element), nullptr};
     }
 
-    LLVM_NODISCARD std::pair<NodePtr, RemoveKind>
-    removeImpl(NodePtr Node, key_type_ref Element, hash_t Hash,
-               shift_t Shift = 0) {
+    struct RemoveResult {
+      NodePtr NewNode;
+      enum RemoveKind { None, Modified, Trivial, Removed } Kind;
+      const_value_type *RemovedElement;
+    };
+
+    LLVM_NODISCARD RemoveResult removeImpl(NodePtr Node, key_type_ref Element,
+                                           hash_t Hash, shift_t Shift = 0) {
       if (LLVM_UNLIKELY(Shift == getMaxShift(Bits))) {
         ArrayRef<value_type> Collisions = Node->getCollisions();
 
         for (count_t Index = 0; Index < Collisions.size(); ++Index)
           if (ValueInfo::areKeysEqual(Collisions[Index], Element)) {
-            RemoveKind Kind = RemoveKind::Modified;
+            auto Kind = RemoveResult::Modified;
             switch (Collisions.size()) {
             case 1:
               // The whole node has been removed
-              return {nullptr, RemoveKind::Removed};
+              return {nullptr, RemoveResult::Removed, &Collisions[Index]};
             case 2:
               // There are no collisions anymore, this node is now not
               // restricted to be at the very bottom.
-              Kind = RemoveKind::Trivial;
+              Kind = RemoveResult::Trivial;
               LLVM_FALLTHROUGH;
             default:
-              return {NodeFactory.removeCollision(Node, Index), Kind};
+              return {NodeFactory.removeCollision(Node, Index), Kind,
+                      &Collisions[Index]};
             }
           }
 
         // Remove nothing.
-        return {nullptr, RemoveKind::None};
+        return {nullptr, RemoveResult::None, nullptr};
       }
 
       hash_t ShiftedMask = getMask(Bits) << Shift;
@@ -760,24 +792,24 @@ public:
         count_t Offset = countPopulation(Node->getNodeMap() & (IndexBit - 1));
         auto Result = removeImpl(Node->getInnerChild(Offset), Element, Hash,
                                  Shift + Bits);
-        switch (Result.second) {
-        case RemoveKind::None:
+        switch (Result.Kind) {
+        case RemoveResult::None:
           // Return the same result, we shouldn't change anything.
           break;
-        case RemoveKind::Modified:
-          Result.first =
-              NodeFactory.replaceInnerNode(Node, Result.first, Offset);
+        case RemoveResult::Modified:
+          Result.NewNode =
+              NodeFactory.replaceInnerNode(Node, Result.NewNode, Offset);
           break;
-        case RemoveKind::Trivial:
+        case RemoveResult::Trivial:
           if (Node->getNumberOfChildren() != 1 || Shift == 0) {
             // Line of trivial nodes collapsing is over.
-            Result.first = NodeFactory.replaceInnerNodeWithData(
-                Node, Result.first, IndexBit, Offset);
-            Result.second = RemoveKind::Modified;
+            Result.NewNode = NodeFactory.replaceInnerNodeWithData(
+                Node, Result.NewNode, IndexBit, Offset);
+            Result.Kind = RemoveResult::Modified;
           } // else remove the same the result because we can
             // easily remove this node.
           break;
-        case RemoveKind::Removed:
+        case RemoveResult::Removed:
           if (Node->getNumberOfChildren() == 1) {
             // We need to remove this node as well.
             break;
@@ -786,14 +818,14 @@ public:
             if (Node->getDataMap() != 0 && Shift != 0) {
               // We remove the only inner child, while leaving one data child.
               // This is a trivial situation.
-              Result.first = Node->getDataChild(0);
-              Result.second = RemoveKind::Trivial;
+              Result.NewNode = Node->getDataChild(0);
+              Result.Kind = RemoveResult::Trivial;
               break;
             }
           }
 
-          Result.first = NodeFactory.removeInnerNode(Node, IndexBit, Offset);
-          Result.second = RemoveKind::Modified;
+          Result.NewNode = NodeFactory.removeInnerNode(Node, IndexBit, Offset);
+          Result.Kind = RemoveResult::Modified;
           break;
         }
 
@@ -808,22 +840,23 @@ public:
           case 1:
             // That is the only child, so we can remove both this child
             // and the inner node containing it.
-            return {nullptr, RemoveKind::Removed};
+            return {nullptr, RemoveResult::Removed, &StoredValue};
           case 2:
             if (Node->getNodeMap() == 0 && Shift != 0) {
               assert(Offset == 0 || Offset == 1);
               count_t OtherOffset = !Offset;
-              return {Node->getDataChild(OtherOffset), RemoveKind::Trivial};
+              return {Node->getDataChild(OtherOffset), RemoveResult::Trivial,
+                      &StoredValue};
             }
             LLVM_FALLTHROUGH;
           default:
             return {NodeFactory.removeDataChild(Node, IndexBit, Offset),
-                    RemoveKind::Modified};
+                    RemoveResult::Modified, &StoredValue};
           }
         }
       }
 
-      return {nullptr, RemoveKind::None};
+      return {nullptr, RemoveResult::None, nullptr};
     }
 
     typename Node::Factory NodeFactory;
