@@ -103,7 +103,7 @@ template <class ValueInfo> class HAMT {
                  "NewElement)\n");
 
         const size_t NewSize = Original->Size + 1;
-        Node *NewNode = allocate<DataNode>(NewSize);
+        Node *NewNode = createEmptyDataNode(NewSize);
 
         ArrayRef<value_type> OriginalCollisions = Original->getCollisions();
         std::uninitialized_copy(OriginalCollisions.begin(),
@@ -122,7 +122,7 @@ template <class ValueInfo> class HAMT {
         DEBUG(llvm::errs()
               << "replaceCollision(NodePtr Original, "
                  "const_value_type_ref NewElement, count_t Index)\n");
-        Node *NewNode = allocate<DataNode>(Original->Size);
+        Node *NewNode = createEmptyDataNode(Original->Size);
 
         ArrayRef<value_type> OriginalCollisions = Original->getCollisions();
         std::uninitialized_copy(OriginalCollisions.begin(),
@@ -139,7 +139,7 @@ template <class ValueInfo> class HAMT {
                "Removing collisions from a node with only 1 collision");
 
         const size_t NewSize = Original->Size - 1;
-        Node *NewNode = allocate<DataNode>(NewSize);
+        Node *NewNode = createEmptyDataNode(NewSize);
 
         ArrayRef<value_type> OriginalCollisions = Original->getCollisions();
         MutableArrayRef<value_type> NewCollisions = NewNode->getCollisions();
@@ -162,7 +162,7 @@ template <class ValueInfo> class HAMT {
               << "replaceInnerNode(NodePtr Original, NodePtr NewChild, "
                  "count_t Offset)\n");
 
-        Node *NewNode = allocate<InnerNode>(Original->Size);
+        Node *NewNode = createEmptyInnerNode(Original->Size);
         ArrayRef<NodePtr> Children = Original->getAllChildren();
 
         NewNode->NodeMap = Original->NodeMap;
@@ -182,7 +182,7 @@ template <class ValueInfo> class HAMT {
                             "const_value_type_ref Element, count_t Offset)\n");
 
         Node *NewChild = createDataNode(Element);
-        Node *NewNode = allocate<InnerNode>(Original->Size);
+        Node *NewNode = createEmptyInnerNode(Original->Size);
         ArrayRef<NodePtr> Children = Original->getAllChildren();
 
         NewNode->Size = Original->Size;
@@ -228,7 +228,7 @@ template <class ValueInfo> class HAMT {
 
       Node *createDataNode(const_value_type_ref Data) {
         DEBUG(llvm::errs() << "createDataNode(const_value_type_ref Data)\n");
-        Node *NewNode = allocate<DataNode>(1);
+        Node *NewNode = createEmptyDataNode(1);
 
         new (&NewNode->getCollisions()[0]) value_type(Data);
 
@@ -238,7 +238,7 @@ template <class ValueInfo> class HAMT {
                            const_value_type_ref Second) {
         DEBUG(llvm::errs() << "createDataNode(const_value_type_ref First, "
                               "const_value_type_ref Second)\n");
-        Node *NewNode = allocate<DataNode>(2);
+        Node *NewNode = createEmptyDataNode(2);
 
         new (&NewNode->getCollisions()[0]) value_type(First);
         new (&NewNode->getCollisions()[1]) value_type(Second);
@@ -249,7 +249,7 @@ template <class ValueInfo> class HAMT {
         DEBUG(llvm::errs() << "createInnerNode(count_t Index, "
                               "const_value_type_ref Element)\n");
         constexpr size_t NewSize = 1;
-        Node *NewNode = allocate<InnerNode>(NewSize);
+        Node *NewNode = createEmptyInnerNode(NewSize);
         Node *Child = createDataNode(Element);
 
         NewNode->NodeMap = 0;
@@ -261,7 +261,7 @@ template <class ValueInfo> class HAMT {
       Node *createInnerNode(count_t Index, NodePtr Child) {
         DEBUG(
             llvm::errs() << "createInnerNode(count_t Index, NodePtr Child)\n");
-        Node *NewNode = allocate<InnerNode>(1);
+        Node *NewNode = createEmptyInnerNode(1);
 
         NewNode->NodeMap = BitmapType{1u} << Index;
         NewNode->DataMap = 0;
@@ -278,7 +278,7 @@ template <class ValueInfo> class HAMT {
                      << "\n");
         assert(FirstIndex != SecondIndex);
 
-        Node *NewNode = allocate<InnerNode>(2);
+        Node *NewNode = createEmptyInnerNode(2);
         Node *FirstNode = createDataNode(First);
         Node *SecondNode = createDataNode(Second);
 
@@ -307,7 +307,7 @@ template <class ValueInfo> class HAMT {
                "Index bit should not correspond to data node");
         assert(!(Original->DataMap & IndexBit) &&
                "Should have an inner node for the given index bit");
-        Node *NewNode = allocate<InnerNode>(Original->Size);
+        Node *NewNode = createEmptyInnerNode(Original->Size);
 
         count_t DataOffset =
             countPopulation(Original->DataMap & (IndexBit - 1));
@@ -353,7 +353,7 @@ template <class ValueInfo> class HAMT {
               << "replaceDataNodeWithInner(NodePtr Original, NodePtr "
                  "NewChild, count_t IndexBit, count_t DataOffset)\n");
 
-        Node *NewNode = allocate<InnerNode>(Original->Size);
+        Node *NewNode = createEmptyInnerNode(Original->Size);
 
         count_t NodeOffset =
             countPopulation(Original->NodeMap & (IndexBit - 1));
@@ -393,7 +393,7 @@ template <class ValueInfo> class HAMT {
 
         const size_t NewSize = Original->Size + 1;
 
-        Node *NewNode = allocate<InnerNode>(NewSize);
+        Node *NewNode = createEmptyInnerNode(NewSize);
 
         NewNode->NodeMap = Original->NodeMap;
         NewNode->DataMap = Original->DataMap | IndexBit;
@@ -425,7 +425,7 @@ template <class ValueInfo> class HAMT {
                "Should have an inner node for the given index bit");
 
         const size_t NewSize = Original->Size - 1;
-        Node *NewNode = allocate<InnerNode>(NewSize);
+        Node *NewNode = createEmptyInnerNode(NewSize);
 
         NewNode->NodeMap = Original->NodeMap ^ IndexBit;
         NewNode->DataMap = Original->DataMap;
@@ -453,7 +453,7 @@ template <class ValueInfo> class HAMT {
                "Should have a data node for the given index bit");
 
         const size_t NewSize = Original->Size - 1;
-        Node *NewNode = allocate<InnerNode>(NewSize);
+        Node *NewNode = createEmptyInnerNode(NewSize);
 
         NewNode->NodeMap = Original->NodeMap;
         NewNode->DataMap = Original->DataMap ^ IndexBit;
@@ -486,7 +486,13 @@ template <class ValueInfo> class HAMT {
         return Result;
       }
 
-      void release(Node *N) {}
+      void release(Node *N) {
+        if (N->isDataNode()) {
+          FreedDataNodes[N->Size - 1].push_back(N);
+        } else {
+          FreedInnerNodes[N->Size - 1].push_back(N);
+        }
+      }
       void release(RootNode *R) {
         if (R->Prev) {
           R->Prev->Next = R->Next;
@@ -510,15 +516,38 @@ template <class ValueInfo> class HAMT {
       }
 
     private:
-      template <class NodeType> Node *allocate(size_t Size) {
-        void *Buffer = getAllocator().Allocate(
-            sizeof(Node) + NodeType::template additionalSizeToAlloc<
-                               typename NodeType::TrailingType>(Size),
-            alignof(Node));
+      Node *createEmptyInnerNode(size_t Size) {
+        return create<InnerNode>(Size, FreedInnerNodes[Size - 1]);
+      }
+      Node *createEmptyDataNode(size_t Size) {
+        return create<DataNode>(Size, FreedDataNodes[Size - 1]);
+      }
+
+      using FreedNodes = std::vector<Node *>;
+      template <class NodeType> Node *create(size_t Size, FreedNodes &Nodes) {
+        void *Buffer = popFreeNode(Nodes);
+        if (!Buffer)
+          Buffer = allocate<NodeType>(Size);
+
         Node *Result = new (Buffer) Node();
         Result->Size = Size;
         Result->Owner = this;
         new (&Result->Tail) NodeType();
+        return Result;
+      }
+
+      template <class NodeType> void *allocate(size_t Size) {
+        return getAllocator().Allocate(
+            sizeof(Node) + NodeType::template additionalSizeToAlloc<
+                               typename NodeType::TrailingType>(Size),
+            alignof(Node));
+      }
+
+      static void *popFreeNode(FreedNodes &Nodes) {
+        if (Nodes.empty())
+          return nullptr;
+        void *Result = Nodes.back();
+        Nodes.pop_back();
         return Result;
       }
 
@@ -531,8 +560,6 @@ template <class ValueInfo> class HAMT {
         RootNode *Prev = nullptr;
         for (; *Result != nullptr;
              Prev = *Result, Result = &((*Result)->Next)) {
-          DEBUG(llvm::errs() << "Iteration #" << i++ << ": " << *Result
-                             << " -> " << (*Result)->Next << "\n");
 
           if (HAMT(*Result).isEqual(HAMT(&Tmp)))
             break;
@@ -548,6 +575,8 @@ template <class ValueInfo> class HAMT {
 
       uintptr_t Allocator;
       DenseMap<hash_t, RootNode *> RootCache;
+      std::array<FreedNodes, getNumberOfBranches(Bits)> FreedInnerNodes;
+      DenseMap<size_t, FreedNodes> FreedDataNodes;
     };
 
     BitmapType getNodeMap() const { return NodeMap; }
@@ -619,6 +648,7 @@ template <class ValueInfo> class HAMT {
       assert(RefCount > 0 && "Reference count is already zero.");
       if (--RefCount == 0) {
         Owner->release(this);
+        Node->Release();
       }
     }
 
