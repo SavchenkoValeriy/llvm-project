@@ -1018,33 +1018,46 @@ public:
   };
 
   LLVM_NODISCARD const_value_type *find(key_type_ref Key) const {
-    if (Root == nullptr)
+    if (LLVM_LIKELY(Root == nullptr))
       return nullptr;
 
-    NodePtr Node = Root->Node;
+    Node *Node = Root->Node.get();
+
+    if (Root->Size == 1) {
+      const_value_type_ref StoredValue = Node->getData(0);
+      if (ValueInfo::areKeysEqual(StoredValue, Key))
+        return &StoredValue;
+      return nullptr;
+    }
+
+    if (Node->getNodeMap() == 0) {
+      for (NodePtr Child : Node->getAllChildren()) {
+        const_value_type_ref StoredValue = Child->getCollisions()[0];
+        if (ValueInfo::areKeysEqual(StoredValue, Key))
+          return &StoredValue;
+      }
+
+      return nullptr;
+    }
     hash_t Hash = ValueInfo::getHash(Key);
 
-    DEBUG(errs() << "Max depth: " << getMaxDepth(Bits) << ", "
-                 << "max shift: " << getMaxShift(Bits) << "\n");
-    for (count_t i = 0; i < getMaxDepth(Bits); ++i) {
-      count_t Index = Hash & getMask(Bits);
-      count_t IndexBit = BitmapType{1u} << Index;
-
-      if (Node->getNodeMap() & IndexBit) {
-        count_t Offset = countPopulation(Node->getNodeMap() & (IndexBit - 1));
-        Node = Node->getInnerChild(Offset);
-        Hash = Hash >> Bits;
-        continue;
-      }
+    for (count_t i = 0; LLVM_LIKELY(i < getMaxDepth(Bits)); ++i) {
+      count_t IndexBit = BitmapType{1u} << (Hash & getMask(Bits));
 
       if (Node->getDataMap() & IndexBit) {
         count_t Offset = countPopulation(Node->getDataMap() & (IndexBit - 1));
         const_value_type_ref StoredValue = Node->getData(Offset);
 
         // When we didn't reach the maximal depth, collisions are not possible.
-        DEBUG(errs() << StoredValue << " vs. " << Key << "\n");
-        if (ValueInfo::areKeysEqual(StoredValue, Key))
+        if (LLVM_LIKELY(ValueInfo::areKeysEqual(StoredValue, Key)))
           return &StoredValue;
+      }
+
+      if (Node->getNodeMap() & IndexBit) {
+        count_t Offset = countPopulation(Node->getNodeMap() & (IndexBit - 1));
+        Node = Node->getInnerChild(Offset).get();
+        Hash = Hash >> Bits;
+        continue;
       }
 
       return nullptr;
@@ -1173,7 +1186,7 @@ template <class T> struct ImmutableHashSetInfo {
     return areKeysEqual(LHS, RHS);
   }
   static bool areKeysEqual(const_value_type_ref LHS, const_value_type_ref RHS) {
-    return LHS == RHS;
+    return std::equal_to<key_type>()(LHS, RHS);
   }
 };
 
