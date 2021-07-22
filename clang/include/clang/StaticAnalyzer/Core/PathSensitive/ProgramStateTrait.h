@@ -20,6 +20,8 @@
 #include "llvm/ADT/ImmutableHashMap.h"
 #include "llvm/ADT/ImmutableHashSet.h"
 #include "llvm/ADT/ImmutableList.h"
+#include "llvm/ADT/ImmutableMap.h"
+#include "llvm/ADT/ImmutableSet.h"
 #include "llvm/Support/Allocator.h"
 #include <cstdint>
 
@@ -50,7 +52,7 @@ template <typename T> struct ProgramStatePartialTrait;
 
 /// Declares a factory for objects of type \p Type in the program state
 /// manager. The type must provide a ::Factory sub-class. Commonly used for
-/// ImmutableHashMap, ImmutableHashSet, ImmutableList. The macro should not be
+/// ImmutableMap, ImmutableSet, ImmutableList. The macro should not be
 /// used inside namespaces.
 #define REGISTER_FACTORY_WITH_PROGRAMSTATE(Type)                               \
   namespace clang {                                                            \
@@ -72,11 +74,12 @@ template <typename T> struct ProgramStatePartialTrait;
 /// would be treated as a macro argument separator, which is wrong.
 /// This allows the user to specify a map type in a way that the preprocessor
 /// can deal with.
-#define CLANG_ENTO_PROGRAMSTATE_MAP(Key, Value)                                \
+#define CLANG_ENTO_PROGRAMSTATE_MAP(Key, Value) llvm::ImmutableMap<Key, Value>
+#define CLANG_ENTO_PROGRAMSTATE_HASH_MAP(Key, Value)                           \
   llvm::ImmutableHashMap<Key, Value>
 
 /// Declares an immutable map of type \p NameTy, suitable for placement into
-/// the ProgramState. This is implementing using llvm::ImmutableHashMap.
+/// the ProgramState. This is implementing using llvm::ImmutableMap.
 ///
 /// \code
 /// State = State->set<Name>(K, V);
@@ -91,16 +94,28 @@ template <typename T> struct ProgramStatePartialTrait;
   REGISTER_TRAIT_WITH_PROGRAMSTATE(Name,                                       \
                                    CLANG_ENTO_PROGRAMSTATE_MAP(Key, Value))
 
+#define REGISTER_HASH_MAP_WITH_PROGRAMSTATE(Name, Key, Value)                  \
+  REGISTER_TRAIT_WITH_PROGRAMSTATE(                                            \
+      Name, CLANG_ENTO_PROGRAMSTATE_HASH_MAP(Key, Value))
+
 /// Declares an immutable map type \p Name and registers the factory
 /// for such maps in the program state, but does not add the map itself
 /// to the program state. Useful for managing lifetime of maps that are used
 /// as elements of other program state data structures.
 #define REGISTER_MAP_FACTORY_WITH_PROGRAMSTATE(Name, Key, Value)               \
+  using Name = llvm::ImmutableMap<Key, Value>;                                 \
+  REGISTER_FACTORY_WITH_PROGRAMSTATE(Name)
+
+// Declares an immutable map type \p Name and registers the factory
+/// for such maps in the program state, but does not add the map itself
+/// to the program state. Useful for managing lifetime of maps that are used
+/// as elements of other program state data structures.
+#define REGISTER_HASH_MAP_FACTORY_WITH_PROGRAMSTATE(Name, Key, Value)          \
   using Name = llvm::ImmutableHashMap<Key, Value>;                             \
   REGISTER_FACTORY_WITH_PROGRAMSTATE(Name)
 
 /// Declares an immutable set of type \p NameTy, suitable for placement into
-/// the ProgramState. This is implementing using llvm::ImmutableHashSet.
+/// the ProgramState. This is implementing using llvm::ImmutableSet.
 ///
 /// \code
 /// State = State->add<Name>(E);
@@ -112,14 +127,14 @@ template <typename T> struct ProgramStatePartialTrait;
 /// The macro should not be used inside namespaces, or for traits that must
 /// be accessible from more than one translation unit.
 #define REGISTER_SET_WITH_PROGRAMSTATE(Name, Elem)                             \
-  REGISTER_TRAIT_WITH_PROGRAMSTATE(Name, llvm::ImmutableHashSet<Elem>)
+  REGISTER_TRAIT_WITH_PROGRAMSTATE(Name, llvm::ImmutableSet<Elem>)
 
 /// Declares an immutable set type \p Name and registers the factory
 /// for such sets in the program state, but does not add the set itself
 /// to the program state. Useful for managing lifetime of sets that are used
 /// as elements of other program state data structures.
 #define REGISTER_SET_FACTORY_WITH_PROGRAMSTATE(Name, Elem)                     \
-  using Name = llvm::ImmutableHashSet<Elem>;                                   \
+  using Name = llvm::ImmutableSet<Elem>;                                       \
   REGISTER_FACTORY_WITH_PROGRAMSTATE(Name)
 
 /// Declares an immutable list type \p NameTy, suitable for placement into
@@ -164,6 +179,82 @@ struct ProgramStatePartialTrait<llvm::ImmutableHashMap<Key, Data, Info>> {
 
   static data_type Set(data_type B, key_type K, value_type E, context_type F) {
     return F.add(B, K, E);
+  }
+
+  static data_type Remove(data_type B, key_type K, context_type F) {
+    return F.remove(B, K);
+  }
+
+  static bool Contains(data_type B, key_type K) { return B.contains(K); }
+
+  static context_type MakeContext(void *p) {
+    return *((typename data_type::Factory *)p);
+  }
+
+  static void *CreateContext(llvm::BumpPtrAllocator &Alloc) {
+    return new typename data_type::Factory(Alloc);
+  }
+
+  static void DeleteContext(void *Ctx) {
+    delete (typename data_type::Factory *)Ctx;
+  }
+};
+
+// Partial-specialization for ImmutableMap.
+template <typename Key, typename Data, typename Info>
+struct ProgramStatePartialTrait<llvm::ImmutableMap<Key, Data, Info>> {
+  using data_type = llvm::ImmutableMap<Key, Data, Info>;
+  using context_type = typename data_type::Factory &;
+  using key_type = Key;
+  using value_type = Data;
+  using lookup_type = const value_type *;
+
+  static data_type MakeData(void *const *p) {
+    return p ? data_type((typename data_type::TreeTy *)*p) : data_type(nullptr);
+  }
+
+  static void *MakeVoidPtr(data_type B) { return B.getRoot(); }
+
+  static lookup_type Lookup(data_type B, key_type K) { return B.lookup(K); }
+
+  static data_type Set(data_type B, key_type K, value_type E, context_type F) {
+    return F.add(B, K, E);
+  }
+
+  static data_type Remove(data_type B, key_type K, context_type F) {
+    return F.remove(B, K);
+  }
+
+  static bool Contains(data_type B, key_type K) { return B.contains(K); }
+
+  static context_type MakeContext(void *p) {
+    return *((typename data_type::Factory *)p);
+  }
+
+  static void *CreateContext(llvm::BumpPtrAllocator &Alloc) {
+    return new typename data_type::Factory(Alloc);
+  }
+
+  static void DeleteContext(void *Ctx) {
+    delete (typename data_type::Factory *)Ctx;
+  }
+};
+
+// Partial-specialization for ImmutableSet.
+template <typename Key, typename Info>
+struct ProgramStatePartialTrait<llvm::ImmutableSet<Key, Info>> {
+  using data_type = llvm::ImmutableSet<Key, Info>;
+  using context_type = typename data_type::Factory &;
+  using key_type = Key;
+
+  static data_type MakeData(void *const *p) {
+    return p ? data_type((typename data_type::TreeTy *)*p) : data_type(nullptr);
+  }
+
+  static void *MakeVoidPtr(data_type B) { return B.getRoot(); }
+
+  static data_type Add(data_type B, key_type K, context_type F) {
+    return F.add(B, K);
   }
 
   static data_type Remove(data_type B, key_type K, context_type F) {

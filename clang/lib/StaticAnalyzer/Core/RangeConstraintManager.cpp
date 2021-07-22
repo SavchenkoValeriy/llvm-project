@@ -512,7 +512,7 @@ class EquivalenceClass;
 
 REGISTER_MAP_WITH_PROGRAMSTATE(ClassMap, SymbolRef, EquivalenceClass)
 REGISTER_MAP_WITH_PROGRAMSTATE(ClassMembers, EquivalenceClass, SymbolSet)
-REGISTER_MAP_WITH_PROGRAMSTATE(ConstraintRange, EquivalenceClass, RangeSet)
+REGISTER_HASH_MAP_WITH_PROGRAMSTATE(ConstraintRange, EquivalenceClass, RangeSet)
 
 REGISTER_SET_FACTORY_WITH_PROGRAMSTATE(ClassSet, EquivalenceClass)
 REGISTER_MAP_WITH_PROGRAMSTATE(DisequalityMap, EquivalenceClass, ClassSet)
@@ -1833,7 +1833,7 @@ inline ProgramStateRef EquivalenceClass::merge(RangeSet::Factory &F,
   // We estimate the size of the class by the height of tree containing
   // its members.  Merging is not a trivial operation, so it's easier to
   // merge the smaller class into the bigger one.
-  if (Members.getSize() >= OtherMembers.getSize()) {
+  if (Members.getHeight() >= OtherMembers.getHeight()) {
     return mergeImpl(F, State, Members, Other, OtherMembers);
   } else {
     return Other.mergeImpl(F, State, OtherMembers, *this, Members);
