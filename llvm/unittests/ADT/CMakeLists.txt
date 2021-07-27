@@ -37,6 +37,8 @@ add_llvm_unittest(ADTTests
   IListTest.cpp
   ImmutableListTest.cpp
   ImmutableMapTest.cpp
+  ImmutableSmallMapTest.cpp
+  ImmutableSmallSetTest.cpp
   ImmutableSetTest.cpp
   IntEqClassesTest.cpp
   IntervalMapTest.cpp
