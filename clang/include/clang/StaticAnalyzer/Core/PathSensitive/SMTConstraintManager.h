@@ -19,7 +19,7 @@
 #include "clang/StaticAnalyzer/Core/PathSensitive/RangedConstraintManager.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/SMTConv.h"
 
-typedef llvm::ImmutableSet<
+typedef llvm::ImmutableSmallSet<
     std::pair<clang::ento::SymbolRef, const llvm::SMTExpr *>>
     ConstraintSMTType;
 REGISTER_TRAIT_WITH_PROGRAMSTATE(ConstraintSMT, ConstraintSMTType)

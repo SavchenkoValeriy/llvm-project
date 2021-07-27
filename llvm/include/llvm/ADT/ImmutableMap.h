@@ -191,10 +191,10 @@ public:
   class iterator : public ImutAVLValueIterator<ImmutableMap> {
     friend class ImmutableMap;
 
-    iterator() = default;
     explicit iterator(TreeTy *Tree) : iterator::ImutAVLValueIterator(Tree) {}
 
   public:
+    iterator() = default;
     key_type_ref getKey() const { return (*this)->first; }
     data_type_ref getData() const { return (*this)->second; }
   };

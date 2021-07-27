@@ -310,7 +310,7 @@ private:
   friend class Factory;
 };
 
-using ConstraintMap = llvm::ImmutableMap<SymbolRef, RangeSet>;
+using ConstraintMap = llvm::ImmutableSmallMap<SymbolRef, RangeSet>;
 ConstraintMap getConstraintMap(ProgramStateRef State);
 
 class RangedConstraintManager : public SimpleConstraintManager {

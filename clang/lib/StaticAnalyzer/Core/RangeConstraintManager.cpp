@@ -1833,7 +1833,7 @@ inline ProgramStateRef EquivalenceClass::merge(RangeSet::Factory &F,
   // We estimate the size of the class by the height of tree containing
   // its members.  Merging is not a trivial operation, so it's easier to
   // merge the smaller class into the bigger one.
-  if (Members.getHeight() >= OtherMembers.getHeight()) {
+  if (OtherMembers < Members) {
     return mergeImpl(F, State, Members, Other, OtherMembers);
   } else {
     return Other.mergeImpl(F, State, OtherMembers, *this, Members);

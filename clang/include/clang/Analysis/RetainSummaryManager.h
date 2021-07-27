@@ -15,15 +15,15 @@
 #ifndef LLVM_CLANG_ANALYSIS_RETAINSUMMARY_MANAGER_H
 #define LLVM_CLANG_ANALYSIS_RETAINSUMMARY_MANAGER_H
 
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/FoldingSet.h"
-#include "llvm/ADT/ImmutableMap.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/ParentMap.h"
 #include "clang/Analysis/AnyCall.h"
 #include "clang/Analysis/SelectorExtras.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/FoldingSet.h"
+#include "llvm/ADT/ImmutableSmallMap.h"
 #include "llvm/ADT/STLExtras.h"
 
 using namespace clang;
@@ -118,6 +118,7 @@ enum ArgEffectKind {
 class ArgEffect {
   ArgEffectKind K;
   ObjKind O;
+
 public:
   explicit ArgEffect(ArgEffectKind K = DoNothing, ObjKind O = ObjKind::AnyObj)
       : K(K), O(O) {}
@@ -125,9 +126,7 @@ public:
   ArgEffectKind getKind() const { return K; }
   ObjKind getObjKind() const { return O; }
 
-  ArgEffect withKind(ArgEffectKind NewK) {
-    return ArgEffect(NewK, O);
-  }
+  ArgEffect withKind(ArgEffectKind NewK) { return ArgEffect(NewK, O); }
 
   bool operator==(const ArgEffect &Other) const {
     return K == Other.K && O == Other.O;
@@ -177,9 +176,7 @@ public:
     return K == OwnedSymbol || K == OwnedWhenTrackedReceiver;
   }
 
-  bool notOwned() const {
-    return K == NotOwnedSymbol;
-  }
+  bool notOwned() const { return K == NotOwnedSymbol; }
 
   bool operator==(const RetEffect &Other) const {
     return K == Other.K && O == Other.O;
@@ -189,33 +186,26 @@ public:
     return RetEffect(OwnedWhenTrackedReceiver, ObjKind::ObjC);
   }
 
-  static RetEffect MakeOwned(ObjKind o) {
-    return RetEffect(OwnedSymbol, o);
-  }
+  static RetEffect MakeOwned(ObjKind o) { return RetEffect(OwnedSymbol, o); }
   static RetEffect MakeNotOwned(ObjKind o) {
     return RetEffect(NotOwnedSymbol, o);
   }
-  static RetEffect MakeNoRet() {
-    return RetEffect(NoRet);
-  }
-  static RetEffect MakeNoRetHard() {
-    return RetEffect(NoRetHard);
-  }
+  static RetEffect MakeNoRet() { return RetEffect(NoRet); }
+  static RetEffect MakeNoRetHard() { return RetEffect(NoRetHard); }
 };
 
 /// A key identifying a summary.
 class ObjCSummaryKey {
-  IdentifierInfo* II;
+  IdentifierInfo *II;
   Selector S;
+
 public:
-  ObjCSummaryKey(IdentifierInfo* ii, Selector s)
-    : II(ii), S(s) {}
+  ObjCSummaryKey(IdentifierInfo *ii, Selector s) : II(ii), S(s) {}
 
   ObjCSummaryKey(const ObjCInterfaceDecl *d, Selector s)
-    : II(d ? d->getIdentifier() : nullptr), S(s) {}
+      : II(d ? d->getIdentifier() : nullptr), S(s) {}
 
-  ObjCSummaryKey(Selector s)
-    : II(nullptr), S(s) {}
+  ObjCSummaryKey(Selector s) : II(nullptr), S(s) {}
 
   IdentifierInfo *getIdentifier() const { return II; }
   Selector getSelector() const { return S; }
@@ -276,7 +266,7 @@ namespace ento {
 
 /// ArgEffects summarizes the effects of a function/method call on all of
 /// its arguments.
-typedef llvm::ImmutableMap<unsigned, ArgEffect> ArgEffects;
+typedef llvm::ImmutableSmallMap<unsigned, ArgEffect> ArgEffects;
 
 /// Summary for a function with respect to ownership changes.
 class RetainSummary {

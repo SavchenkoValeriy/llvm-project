@@ -46,8 +46,8 @@ public:
 // operations. A custom map implementation is used, in order to make it
 // available in an arbitrary amount of translation units.
 struct RequestMap {};
-typedef llvm::ImmutableMap<const clang::ento::MemRegion *,
-                           clang::ento::mpi::Request>
+typedef llvm::ImmutableSmallMap<const clang::ento::MemRegion *,
+                                clang::ento::mpi::Request>
     RequestMapImpl;
 
 } // end of namespace: mpi

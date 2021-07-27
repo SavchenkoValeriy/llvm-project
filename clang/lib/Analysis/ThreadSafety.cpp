@@ -39,7 +39,7 @@
 #include "clang/Basic/Specifiers.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/ImmutableMap.h"
+#include "llvm/ADT/ImmutableSmallMap.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/STLExtras.h"
@@ -66,9 +66,9 @@ using namespace threadSafety;
 ThreadSafetyHandler::~ThreadSafetyHandler() = default;
 
 /// Issue a warning about an invalid lock expression
-static void warnInvalidLock(ThreadSafetyHandler &Handler,
-                            const Expr *MutexExp, const NamedDecl *D,
-                            const Expr *DeclExp, StringRef Kind) {
+static void warnInvalidLock(ThreadSafetyHandler &Handler, const Expr *MutexExp,
+                            const NamedDecl *D, const Expr *DeclExp,
+                            StringRef Kind) {
   SourceLocation Loc;
   if (DeclExp)
     Loc = DeclExp->getExprLoc();
@@ -319,7 +319,7 @@ namespace {
 
 class LocalVariableMap;
 
-using LocalVarContext = llvm::ImmutableMap<const NamedDecl *, unsigned>;
+using LocalVarContext = llvm::ImmutableSmallMap<const NamedDecl *, unsigned>;
 
 /// A side (entry or exit) of a CFG node.
 enum CFGBlockSide { CBS_Entry, CBS_Exit };
