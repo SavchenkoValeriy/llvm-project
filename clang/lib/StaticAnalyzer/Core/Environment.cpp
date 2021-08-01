@@ -174,10 +174,9 @@ public:
 //   - Mark their reachable symbols live in SymbolReaper,
 //     see ScanReachableSymbols.
 //   - Mark the region in DRoots if the binding is a loc::MemRegionVal.
-Environment
-EnvironmentManager::removeDeadBindings(Environment Env,
-                                       SymbolReaper &SymReaper,
-                                       ProgramStateRef ST) {
+Environment EnvironmentManager::removeDeadBindings(Environment Env,
+                                                   SymbolReaper &SymReaper,
+                                                   ProgramStateRef ST) {
   // We construct a new Environment object entirely, as this is cheaper than
   // individually removing all the subexpression bindings (which will greatly
   // outnumber block-level expression bindings).
@@ -186,9 +185,7 @@ EnvironmentManager::removeDeadBindings(Environment Env,
   MarkLiveCallback CB(SymReaper);
   ScanReachableSymbols RSScaner(ST, CB);
 
-  llvm::ImmutableMapRef<EnvironmentEntry, SVal>
-    EBMapRef(NewEnv.ExprBindings.getRootWithoutRetain(),
-             F.getTreeFactory());
+  Environment::BindingsTy EBMap = NewEnv.ExprBindings;
 
   // Iterate over the block-expr bindings.
   for (Environment::iterator I = Env.begin(), End = Env.end(); I != End; ++I) {
@@ -201,14 +198,14 @@ EnvironmentManager::removeDeadBindings(Environment Env,
 
     if (SymReaper.isLive(E, BlkExpr.getLocationContext())) {
       // Copy the binding to the new map.
-      EBMapRef = EBMapRef.add(BlkExpr, X);
+      EBMap = F.add(std::move(EBMap), BlkExpr, X);
 
       // Mark all symbols in the block expr's value live.
       RSScaner.scan(X);
     }
   }
 
-  NewEnv.ExprBindings = EBMapRef.asImmutableMap();
+  NewEnv.ExprBindings = EBMap;
   return NewEnv;
 }
 
