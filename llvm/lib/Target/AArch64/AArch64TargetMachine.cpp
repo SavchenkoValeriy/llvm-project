@@ -176,6 +176,11 @@ static cl::opt<bool> EnableFalkorHWPFFix("aarch64-enable-falkor-hwpf-fix",
                                          cl::init(true), cl::Hidden);
 
 static cl::opt<bool>
+    EnableVectorRegZeroing("aarch64-enable-vector-reg-zeroing",
+                           cl::desc("Zero unused vector registers before loops"),
+                           cl::init(true), cl::Hidden);
+
+static cl::opt<bool>
     EnableBranchTargets("aarch64-enable-branch-targets", cl::Hidden,
                         cl::desc("Enable the AArch64 branch target pass"),
                         cl::init(true));
@@ -275,6 +280,7 @@ LLVMInitializeAArch64Target() {
   initializeAArch64SLSHardeningPass(PR);
   initializeAArch64StackTaggingPass(PR);
   initializeAArch64StackTaggingPreRAPass(PR);
+  initializeAArch64VectorRegZeroingPass(PR);
   initializeAArch64LowerHomogeneousPrologEpilogPass(PR);
   initializeAArch64DAGToDAGISelLegacyPass(PR);
   initializeAArch64CondBrTuningPass(PR);
@@ -851,6 +857,8 @@ void AArch64PassConfig::addPreSched2() {
   if (TM->getOptLevel() != CodeGenOptLevel::None) {
     if (EnableFalkorHWPFFix)
       addPass(createFalkorHWPFFixPass());
+    if (EnableVectorRegZeroing)
+      addPass(createAArch64VectorRegZeroingPass());
   }
 }
 

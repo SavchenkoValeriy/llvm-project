@@ -10,6 +10,22 @@ define void @convolution(ptr %src0, ptr %src1, i64 %stride_xm, i64 %stride_xp, p
 ; CHECK-NEXT:    add x10, x1, x2
 ; CHECK-NEXT:    add x11, x0, x2
 ; CHECK-NEXT:    add x12, x0, x3
+; CHECK-NEXT:    movi v16.2d, #0000000000000000
+; CHECK-NEXT:    movi v17.2d, #0000000000000000
+; CHECK-NEXT:    movi v18.2d, #0000000000000000
+; CHECK-NEXT:    movi v19.2d, #0000000000000000
+; CHECK-NEXT:    movi v20.2d, #0000000000000000
+; CHECK-NEXT:    movi v21.2d, #0000000000000000
+; CHECK-NEXT:    movi v22.2d, #0000000000000000
+; CHECK-NEXT:    movi v23.2d, #0000000000000000
+; CHECK-NEXT:    movi v24.2d, #0000000000000000
+; CHECK-NEXT:    movi v25.2d, #0000000000000000
+; CHECK-NEXT:    movi v26.2d, #0000000000000000
+; CHECK-NEXT:    movi v27.2d, #0000000000000000
+; CHECK-NEXT:    movi v28.2d, #0000000000000000
+; CHECK-NEXT:    movi v29.2d, #0000000000000000
+; CHECK-NEXT:    movi v30.2d, #0000000000000000
+; CHECK-NEXT:    movi v31.2d, #0000000000000000
 ; CHECK-NEXT:  .LBB0_1: // %do.body
 ; CHECK-NEXT:    // =>This Inner Loop Header: Depth=1
 ; CHECK-NEXT:    add x13, x1, x8

@@ -20,6 +20,28 @@ define float @test1(ptr nocapture readonly %arr, i64 %start, float %threshold) {
 ; CHECK-NEXT:    cbz x1, .LBB0_4
 ; CHECK-NEXT:  // %bb.1: // %for.body.preheader
 ; CHECK-NEXT:    add x8, x0, #28
+; CHECK-NEXT:    movi v2.2d, #0000000000000000
+; CHECK-NEXT:    movi v3.2d, #0000000000000000
+; CHECK-NEXT:    movi v4.2d, #0000000000000000
+; CHECK-NEXT:    movi v5.2d, #0000000000000000
+; CHECK-NEXT:    movi v6.2d, #0000000000000000
+; CHECK-NEXT:    movi v7.2d, #0000000000000000
+; CHECK-NEXT:    movi v16.2d, #0000000000000000
+; CHECK-NEXT:    movi v17.2d, #0000000000000000
+; CHECK-NEXT:    movi v18.2d, #0000000000000000
+; CHECK-NEXT:    movi v19.2d, #0000000000000000
+; CHECK-NEXT:    movi v20.2d, #0000000000000000
+; CHECK-NEXT:    movi v21.2d, #0000000000000000
+; CHECK-NEXT:    movi v22.2d, #0000000000000000
+; CHECK-NEXT:    movi v23.2d, #0000000000000000
+; CHECK-NEXT:    movi v24.2d, #0000000000000000
+; CHECK-NEXT:    movi v25.2d, #0000000000000000
+; CHECK-NEXT:    movi v26.2d, #0000000000000000
+; CHECK-NEXT:    movi v27.2d, #0000000000000000
+; CHECK-NEXT:    movi v28.2d, #0000000000000000
+; CHECK-NEXT:    movi v29.2d, #0000000000000000
+; CHECK-NEXT:    movi v30.2d, #0000000000000000
+; CHECK-NEXT:    movi v31.2d, #0000000000000000
 ; CHECK-NEXT:  .LBB0_2: // %for.body
 ; CHECK-NEXT:    // =>This Inner Loop Header: Depth=1
 ; CHECK-NEXT:    ldr s1, [x8, x1, lsl #2]
@@ -65,6 +87,27 @@ define float @test2(ptr nocapture readonly %arr, i64 %start, float %threshold) {
 ; CHECK-NEXT:    cbz x1, .LBB1_4
 ; CHECK-NEXT:  // %bb.1: // %for.body.preheader
 ; CHECK-NEXT:    add x8, x0, #28
+; CHECK-NEXT:    movi v3.2d, #0000000000000000
+; CHECK-NEXT:    movi v4.2d, #0000000000000000
+; CHECK-NEXT:    movi v5.2d, #0000000000000000
+; CHECK-NEXT:    movi v6.2d, #0000000000000000
+; CHECK-NEXT:    movi v7.2d, #0000000000000000
+; CHECK-NEXT:    movi v16.2d, #0000000000000000
+; CHECK-NEXT:    movi v17.2d, #0000000000000000
+; CHECK-NEXT:    movi v18.2d, #0000000000000000
+; CHECK-NEXT:    movi v19.2d, #0000000000000000
+; CHECK-NEXT:    movi v20.2d, #0000000000000000
+; CHECK-NEXT:    movi v21.2d, #0000000000000000
+; CHECK-NEXT:    movi v22.2d, #0000000000000000
+; CHECK-NEXT:    movi v23.2d, #0000000000000000
+; CHECK-NEXT:    movi v24.2d, #0000000000000000
+; CHECK-NEXT:    movi v25.2d, #0000000000000000
+; CHECK-NEXT:    movi v26.2d, #0000000000000000
+; CHECK-NEXT:    movi v27.2d, #0000000000000000
+; CHECK-NEXT:    movi v28.2d, #0000000000000000
+; CHECK-NEXT:    movi v29.2d, #0000000000000000
+; CHECK-NEXT:    movi v30.2d, #0000000000000000
+; CHECK-NEXT:    movi v31.2d, #0000000000000000
 ; CHECK-NEXT:  .LBB1_2: // %for.body
 ; CHECK-NEXT:    // =>This Inner Loop Header: Depth=1
 ; CHECK-NEXT:    scvtf s1, x1

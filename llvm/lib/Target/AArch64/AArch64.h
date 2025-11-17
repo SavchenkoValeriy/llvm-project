@@ -54,6 +54,7 @@ FunctionPass *createAArch64PointerAuthPass();
 FunctionPass *createAArch64BranchTargetsPass();
 FunctionPass *createAArch64MIPeepholeOptPass();
 FunctionPass *createAArch64PostCoalescerPass();
+FunctionPass *createAArch64VectorRegZeroingPass();
 
 FunctionPass *createAArch64CleanupLocalDynamicTLSPass();
 
@@ -114,6 +115,7 @@ void initializeSMEABIPass(PassRegistry &);
 void initializeSMEPeepholeOptPass(PassRegistry &);
 void initializeMachineSMEABIPass(PassRegistry &);
 void initializeSVEIntrinsicOptsPass(PassRegistry &);
+void initializeAArch64VectorRegZeroingPass(PassRegistry &);
 void initializeAArch64Arm64ECCallLoweringPass(PassRegistry &);
 } // end namespace llvm
 
